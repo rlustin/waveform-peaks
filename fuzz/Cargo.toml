@@ -1,0 +1,21 @@
+[package]
+name = "waveform-peaks-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.waveform-peaks]
+path = ".."
+
+[[bin]]
+name = "ogg_opus"
+path = "fuzz_targets/ogg_opus.rs"
+test = false
+doc = false
+bench = false

@@ -79,10 +79,14 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
+cargo +nightly fuzz run ogg_opus       # fuzz Ogg Opus decoding
 ```
 
 Clippy runs twice so builds without the `opus` feature stay clean. `cargo deny
-check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
+check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny). Fuzzing
+needs a nightly toolchain and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
+Seed `fuzz/corpus/ogg_opus` with small Opus files, each prefixed with one byte
+that the target reads as options.
 
 ### Oracle tests
 
@@ -111,7 +115,6 @@ exactly.
   which `deny.toml` does not allow yet.
 - Several zoom levels in one pass.
 - A pure-Rust Opus decoder behind a feature flag.
-- Fuzzing `OggOpusSource` on malformed uploads.
 
 ## License
 
