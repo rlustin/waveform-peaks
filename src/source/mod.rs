@@ -2,12 +2,16 @@
 
 #[cfg(feature = "opus")]
 mod ogg_opus;
+#[cfg(feature = "opus")]
+mod opus;
 
 use std::fmt;
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "opus")]
-pub use ogg_opus::{DecodeRate, OggOpusSource, OpusOptions, Overflow};
+pub use ogg_opus::OggOpusSource;
+#[cfg(feature = "opus")]
+pub use opus::{DecodeRate, OpusOptions, Overflow};
 
 use crate::Error;
 
@@ -124,4 +128,9 @@ pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize
         }
     }
     Ok(filled)
+}
+
+#[cfg(feature = "opus")]
+pub(crate) fn invalid(message: &str) -> Error {
+    Error::InvalidInput(message.to_owned())
 }
