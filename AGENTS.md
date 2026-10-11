@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## Commands
+
+Build, test, lint and format commands are in the Development section of
+`README.md`.
+
 ## Language
 
 - Write all code, comments, and documentation in English.

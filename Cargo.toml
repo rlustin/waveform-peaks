@@ -1,0 +1,36 @@
+[package]
+name = "waveform-peaks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rlustin/waveform-peaks"
+description = "Constant-memory generation of audiowaveform-compatible peak data from streamed audio"
+keywords = ["audio", "waveform", "peaks", "opus", "audiowaveform"]
+categories = ["multimedia::audio", "visualization"]
+include = ["/src", "/tests", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["opus"]
+# Ogg Opus decoding through libopus.
+opus = ["dep:ogg", "dep:opus"]
+
+[dependencies]
+ogg = { version = "0.9.2", optional = true }
+opus = { version = "0.4.0", optional = true }
+
+[dev-dependencies]
+serde_json = "1.0.152"
+tempfile = "3.27.0"
+
+[[example]]
+name = "generate"
+required-features = ["opus"]

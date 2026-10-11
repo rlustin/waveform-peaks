@@ -1,0 +1,63 @@
+//! Generates a `.dat` or `.json` waveform from an Ogg Opus file.
+//!
+//! Usage: generate <input.opus> <output.dat|output.json> [zoom] [8|16] [split]
+
+use std::{env, fs::File, io, path::Path, process::ExitCode};
+
+use tempfile::NamedTempFile;
+use waveform_peaks::{
+    Bits, ChannelMode, DatWriter, JsonWriter, Limits, OggOpusSource, Options, generate,
+};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!(
+            "usage: {} <input.opus> <output.dat|output.json> [zoom] [8|16] [split]",
+            args[0]
+        );
+        return ExitCode::FAILURE;
+    }
+    let mut options = Options::default();
+    if let Some(zoom) = args.get(3) {
+        options.samples_per_pixel = zoom.parse().expect("zoom is a number");
+    }
+    if args.get(4).is_some_and(|bits| bits == "8") {
+        options.bits = Bits::Eight;
+    }
+    if args.get(5).is_some_and(|mode| mode == "split") {
+        options.channel_mode = ChannelMode::Split;
+    }
+    match run(&args[1], &args[2], &options) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(input: &str, output: &str, options: &Options) -> Result<(), waveform_peaks::Error> {
+    let mut source = OggOpusSource::new(File::open(input)?)?;
+    // A failed run leaves a partial waveform, so only a complete one replaces
+    // `output`. The temporary file is deleted when dropped on error.
+    let dir = Path::new(output).parent().unwrap_or(Path::new("."));
+    let mut file = NamedTempFile::new_in(dir)?;
+    if output.ends_with(".json") {
+        generate(
+            &mut source,
+            options,
+            &Limits::default(),
+            JsonWriter::new(&mut file),
+        )?;
+    } else {
+        generate(
+            &mut source,
+            options,
+            &Limits::default(),
+            DatWriter::new(&mut file),
+        )?;
+    }
+    file.persist(output).map_err(io::Error::from)?;
+    Ok(())
+}
