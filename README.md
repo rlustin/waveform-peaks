@@ -82,11 +82,18 @@ cargo deny check                       # dependency licenses and advisories
 cargo +nightly fuzz run ogg_opus       # fuzz Ogg Opus decoding
 ```
 
-Clippy runs twice so builds without the `opus` feature stay clean. `cargo deny
-check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny). Fuzzing
-needs a nightly toolchain and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
-Seed `fuzz/corpus/ogg_opus` with small Opus files, each prefixed with one byte
-that the target reads as options.
+GitHub Actions runs all of these except the oracle tests on every push and pull
+request, with the tests also on Rust 1.88 and fuzzing limited to one minute.
+Clippy runs twice so builds without the `opus` feature stay clean.
+`cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
+Fuzzing needs a nightly toolchain and
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Seed `fuzz/corpus/ogg_opus`
+with small Opus files, each prefixed with one byte that the target reads as
+options.
+
+For runs longer than CI's minute, skip `-fork`, whose temporary directories
+fill the disk, and raise `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
+under the sanitizer grows past 512 MB without a leak.
 
 ### Oracle tests
 
