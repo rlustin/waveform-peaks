@@ -78,9 +78,11 @@ cargo test --test oracle -- --ignored  # comparison with audiowaveform
 cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
 cargo fmt
+cargo deny check                       # dependency licenses and advisories
 ```
 
-Clippy runs twice so builds without the `opus` feature stay clean.
+Clippy runs twice so builds without the `opus` feature stay clean. `cargo deny
+check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 
 ### Oracle tests
 
@@ -105,7 +107,8 @@ exactly.
 - Chained Ogg files: only the first link is decoded.
 - Ogg Skeleton: a file whose first page belongs to a Skeleton stream is
   rejected, since only the stream of the first page is decoded.
-- Other formats (WAV, FLAC, MP3, Vorbis) through Symphonia.
+- Other formats (WAV, FLAC, MP3, Vorbis) through Symphonia. It is MPL-2.0,
+  which `deny.toml` does not allow yet.
 - Several zoom levels in one pass.
 - A pure-Rust Opus decoder behind a feature flag.
 - Fuzzing `OggOpusSource` on malformed uploads.
@@ -119,7 +122,8 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
-The Ogg Opus decoder builds libopus (BSD-3-Clause) into the binary:
-distributing a binary means shipping its copyright notice, along with that of
-the `ogg` crate. audiowaveform (GPL-3.0) is only run as a separate program by
-the ignored oracle tests and is not part of the crate.
+Dependencies are limited to permissive licenses by `deny.toml`. The Ogg Opus
+decoder builds libopus (BSD-3-Clause) into the binary: distributing a binary
+means shipping its copyright notice, along with that of the `ogg` crate.
+audiowaveform (GPL-3.0) is only run as a separate program by the ignored
+oracle tests and is not part of the crate.

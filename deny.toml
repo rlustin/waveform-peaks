@@ -1,0 +1,18 @@
+# Dependency checks: `cargo deny check`.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licenses only, so the crate stays usable under MIT OR Apache-2.0.
+# Copyleft licenses, including file-level ones like MPL-2.0, need a deliberate
+# decision before being added here.
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

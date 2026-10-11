@@ -16,6 +16,11 @@ Build, test, lint and format commands are in the Development section of
 - Do not describe what the code does — well-named identifiers already do that.
 - Keep comments short: one line is almost always enough.
 
+## Dependencies
+
+- Adding a license to `deny.toml` is a licensing decision for the
+  maintainer, not a fix for a failing `cargo deny check`.
+
 ## API
 
 - Public configuration structs are `#[non_exhaustive]`: build them from
