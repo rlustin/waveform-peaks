@@ -86,3 +86,4 @@ jobs:
       # The prebuilt cargo-fuzz is a musl binary and defaults to its own target,
       # which the address sanitizer does not support.
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu ogg_opus -- -max_total_time=60 -max_len=32768 -timeout=10 -rss_limit_mb=512
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu webm_opus -- -max_total_time=60 -max_len=32768 -timeout=10 -rss_limit_mb=512

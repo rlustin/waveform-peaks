@@ -1,19 +1,26 @@
-//! Generates a `.dat` or `.json` waveform from an Ogg Opus file.
+//! Generates a `.dat` or `.json` waveform from an Ogg Opus or WebM Opus file.
 //!
-//! Usage: generate <input.opus> <output.dat|output.json> [zoom] [8|16] [split]
+//! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split]
 
-use std::{env, fs::File, io, path::Path, process::ExitCode};
+use std::{
+    env,
+    fs::File,
+    io::{self, BufRead, BufReader},
+    path::Path,
+    process::ExitCode,
+};
 
 use tempfile::NamedTempFile;
 use waveform_peaks::{
-    Bits, ChannelMode, DatWriter, JsonWriter, Limits, OggOpusSource, Options, generate,
+    Bits, ChannelMode, DatWriter, Error, JsonWriter, Limits, OggOpusSource, Options, PcmSource,
+    WebmOpusSource, generate,
 };
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: {} <input.opus> <output.dat|output.json> [zoom] [8|16] [split]",
+            "usage: {} <input> <output.dat|output.json> [zoom] [8|16] [split]",
             args[0]
         );
         return ExitCode::FAILURE;
@@ -37,22 +44,35 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: &str, output: &str, options: &Options) -> Result<(), waveform_peaks::Error> {
-    let mut source = OggOpusSource::new(File::open(input)?)?;
+/// Picks the container from the first bytes rather than the file name.
+fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
+    let mut input = BufReader::new(File::open(path)?);
+    let magic = input.fill_buf()?;
+    if magic.starts_with(b"OggS") {
+        Ok(Box::new(OggOpusSource::new(input)?))
+    } else if magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Ok(Box::new(WebmOpusSource::new(input)?))
+    } else {
+        Err(Error::Unsupported("neither Ogg nor WebM".into()))
+    }
+}
+
+fn run(input: &str, output: &str, options: &Options) -> Result<(), Error> {
+    let source = &mut *open(input)?;
     // A failed run leaves a partial waveform, so only a complete one replaces
     // `output`. The temporary file is deleted when dropped on error.
     let dir = Path::new(output).parent().unwrap_or(Path::new("."));
     let mut file = NamedTempFile::new_in(dir)?;
     if output.ends_with(".json") {
         generate(
-            &mut source,
+            source,
             options,
             &Limits::default(),
             JsonWriter::new(&mut file),
         )?;
     } else {
         generate(
-            &mut source,
+            source,
             options,
             &Limits::default(),
             DatWriter::new(&mut file),

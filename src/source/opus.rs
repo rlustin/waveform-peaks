@@ -1,4 +1,4 @@
-//! Opus decoding, independent of the container.
+//! Opus decoding shared by the Ogg and WebM readers.
 
 use std::fmt;
 use std::ops::Range;
@@ -43,7 +43,8 @@ pub enum Overflow {
     Wrap,
 }
 
-/// Decoder settings.
+/// Decoder settings, shared by [`OggOpusSource`](crate::OggOpusSource) and
+/// [`WebmOpusSource`](crate::WebmOpusSource).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OpusOptions {
@@ -51,10 +52,11 @@ pub struct OpusOptions {
     pub decode_rate: DecodeRate,
     /// Handling of decoded samples beyond full scale.
     pub overflow: Overflow,
-    /// Largest Ogg packet buffered before decoding, checked page by page, so a
-    /// packet can exceed it by up to one page (64 KiB). Bounds memory against
-    /// packets spanning many pages. The default, 16 MiB, leaves room for an
-    /// `OpusTags` header carrying cover art. Audio packets are far smaller.
+    /// Largest Ogg packet or WebM block buffered before decoding. Bounds
+    /// memory against crafted sizes. An Ogg packet is checked page by page, so
+    /// it can exceed the limit by up to one page (64 KiB). The default, 16 MiB,
+    /// leaves room for an `OpusTags` header carrying cover art. Audio packets
+    /// are far smaller.
     pub max_packet_bytes: usize,
 }
 
@@ -111,7 +113,8 @@ pub(crate) enum End {
     /// Nowhere in this packet.
     Open,
     /// At this position counted from the start of the stream, pre-skip
-    /// included (an Ogg granule position).
+    /// included (an Ogg granule position, or a WebM block end less its
+    /// `DiscardPadding`).
     At(u64),
 }
 
@@ -173,6 +176,20 @@ impl OpusDecoder {
 
     pub(crate) fn channels(&self) -> u16 {
         self.channels
+    }
+
+    /// Frames decoded so far, pre-skip included.
+    pub(crate) fn position(&self) -> u64 {
+        self.decoded
+    }
+
+    /// Frames `packet` decodes to, without decoding it.
+    pub(crate) fn packet_frames(&self, packet: &[u8]) -> Result<u64, Error> {
+        if packet.is_empty() {
+            return Ok(0);
+        }
+        let frames = self.decoder.get_nb_samples(packet).map_err(opus_error)?;
+        Ok(frames as u64)
     }
 
     /// Decodes `packet`. Returns whether any samples are left after trimming;

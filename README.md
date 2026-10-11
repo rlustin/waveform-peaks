@@ -8,12 +8,15 @@ and JSON) from streamed audio. Draft.
 ```text
 PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSink
 (OggOpusSource,             (min/max per             (DatWriter, JsonWriter,
- RawPcmSource)               output channel)          MemorySink)
+ WebmOpusSource,             output channel)          MemorySink)
+ RawPcmSource)
 ```
 
 - **`PcmSource`** returns one decoded block at a time, borrowed from its own
-  buffer. `OggOpusSource` reads with plain `Read`, so an upload body can be
-  decoded as it arrives.
+  buffer. `OggOpusSource` and `WebmOpusSource` read with plain `Read`, so an
+  upload body can be decoded as it arrives. `WebmOpusSource` also reads
+  Matroska, and browser `MediaRecorder` recordings, whose clusters have no
+  size.
 - **`PeakBuilder`** keeps one `(min, max)` accumulator per output channel.
 - **`PeakSink`** receives each point as it completes. `DatWriter` patches the
   length field at the end (needs `Seek`). `JsonWriter` writes `length` after
@@ -34,15 +37,15 @@ The API is synchronous because decoding is CPU-bound. In an async server, run
 `generate` with `spawn_blocking` and read the upload through `tokio-util`'s
 `SyncIoBridge`; the crate docs have an example.
 
-On a one-hour stereo Opus file, peak memory is 2 MB at zoom 256 and at zoom 32,
-against 15 MB and 64 MB for audiowaveform 1.11.1, which keeps the output in
-memory.
+On a one-hour stereo Opus file, in Ogg or WebM, peak memory is 2 MB at zoom 256
+and at zoom 32, against 15 MB and 64 MB for audiowaveform 1.11.1, which keeps
+the output in memory.
 
 ## Features
 
-The default `opus` feature decodes Ogg Opus with libopus, which the `opus`
-crate compiles from source: building it needs `cmake` and a C compiler. Without
-it, only raw PCM input is available:
+The default `opus` feature decodes Opus from Ogg and WebM with libopus, which
+the `opus` crate compiles from source: building it needs `cmake` and a C
+compiler. Without it, only raw PCM input is available:
 
 ```toml
 waveform-peaks = { version = "0.1", default-features = false }
@@ -65,6 +68,10 @@ source (it is GPL-3.0):
 | Opus samples | Float decode × 32767, rounded half to even; overshoot wraps (`Overflow::Wrap`) |
 | Opus framing | Pre-skip dropped, end trimmed to the last granule position, output gain applied |
 
+audiowaveform does not read WebM. `WebmOpusSource` takes the pre-skip from
+`CodecDelay` and the end trimming from `DiscardPadding`, and on the same packets
+gives exactly the output of `OggOpusSource`.
+
 `Overflow::Saturate` is the default because wrapping makes clipped audio read
 below full scale. Use `Overflow::Wrap` to match audiowaveform: within ±1 per
 value with the bundled libopus (see Oracle tests).
@@ -80,16 +87,17 @@ cargo clippy --no-default-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
 cargo +nightly fuzz run ogg_opus       # fuzz Ogg Opus decoding
+cargo +nightly fuzz run webm_opus      # fuzz WebM Opus decoding
 ```
 
 GitHub Actions runs all of these except the oracle tests on every push and pull
-request, with the tests also on Rust 1.88 and fuzzing limited to one minute.
-Clippy runs twice so builds without the `opus` feature stay clean.
-`cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
-Fuzzing needs a nightly toolchain and
-[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Seed `fuzz/corpus/ogg_opus`
-with small Opus files, each prefixed with one byte that the target reads as
-options.
+request, with the tests also on Rust 1.88 and fuzzing limited to one minute per target.
+Clippy runs twice so builds without the `opus` feature stay clean. `cargo deny
+check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny). Fuzzing
+needs a nightly toolchain and
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Seed
+`fuzz/corpus/<target>` with small files, each prefixed with one byte that the
+target reads as options.
 
 For runs longer than CI's minute, skip `-fork`, whose temporary directories
 fill the disk, and raise `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
@@ -105,7 +113,10 @@ set `AUDIOWAVEFORM` and `FFMPEG`. They compare:
 - JSON output field by field;
 - Ogg Opus fixtures encoded by ffmpeg at test time: mono, stereo with an odd
   length, a 16 kHz input, a 44.1 kHz input, patched `OpusHead` rate and gain,
-  and a clipping square wave.
+  and a clipping square wave;
+- the same fixtures remuxed to WebM, with known and unknown segment sizes:
+  exactly equal to this crate's Ogg output, and to audiowaveform's within the
+  Opus tolerance.
 
 Opus comparisons allow ±1 per value. The `opus` crate bundles its own libopus
 build, whose float output differs in the last bit from Homebrew's. Decoding
@@ -118,8 +129,10 @@ exactly.
 - Chained Ogg files: only the first link is decoded.
 - Ogg Skeleton: a file whose first page belongs to a Skeleton stream is
   rejected, since only the stream of the first page is decoded.
-- Other formats (WAV, FLAC, MP3, Vorbis) through Symphonia. It is MPL-2.0,
-  which `deny.toml` does not allow yet.
+- Other formats (WAV, FLAC, MP3, Vorbis, and AAC in MP4 as Safari records it)
+  through Symphonia. It is MPL-2.0, which `deny.toml` does not allow yet.
+- Matroska beyond what recorders write: compressed or encrypted tracks, and
+  files with several segments (only the first is decoded).
 - Several zoom levels in one pass.
 - A pure-Rust Opus decoder behind a feature flag.
 
@@ -132,7 +145,7 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
-Dependencies are limited to permissive licenses by `deny.toml`. The Ogg Opus
+Dependencies are limited to permissive licenses by `deny.toml`. The Opus
 decoder builds libopus (BSD-3-Clause) into the binary: distributing a binary
 means shipping its copyright notice, along with that of the `ogg` crate.
 audiowaveform (GPL-3.0) is only run as a separate program by the ignored

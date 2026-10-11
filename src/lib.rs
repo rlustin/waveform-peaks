@@ -5,6 +5,10 @@
 //! [`PeakSink`]. No stage holds more than one block, so memory does not grow
 //! with the input: an hour-long upload uses the same memory as a second.
 //!
+//! Sources are [`RawPcmSource`] for raw PCM and, with the default `opus`
+//! feature, [`OggOpusSource`] and [`WebmOpusSource`] for Opus in Ogg, WebM and
+//! Matroska.
+//!
 //! For the same options the output matches BBC audiowaveform byte for byte on
 //! PCM input. On Opus input with `Overflow::Wrap` it is within ±1 per value,
 //! because the bundled libopus build differs from audiowaveform's in the last
@@ -66,7 +70,7 @@ pub use error::Error;
 pub use options::{Bits, ChannelMode, Limits, Options};
 pub use sink::{DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
 #[cfg(feature = "opus")]
-pub use source::{DecodeRate, OggOpusSource, OpusOptions, Overflow};
+pub use source::{DecodeRate, OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
 pub use source::{PcmSource, RawPcmSource};
 
 /// Drains `source` into `sink` and returns the sink's output.
@@ -79,7 +83,7 @@ pub use source::{PcmSource, RawPcmSource};
 /// - Errors from the source, the builder, and the sink pass through. The sink
 ///   has received the points decoded before the error and is not finished: a
 ///   `.dat` file keeps a zero length in its header.
-pub fn generate<P: PcmSource, S: PeakSink>(
+pub fn generate<P: PcmSource + ?Sized, S: PeakSink>(
     source: &mut P,
     options: &Options,
     limits: &Limits,

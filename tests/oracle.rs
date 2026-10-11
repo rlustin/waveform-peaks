@@ -145,7 +145,7 @@ fn raw_pcm_json_matches_audiowaveform() {
 #[cfg(feature = "opus")]
 mod opus_input {
     use super::*;
-    use waveform_peaks::{OggOpusSource, OpusOptions, Overflow};
+    use waveform_peaks::{OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
 
     fn ffmpeg(args: &[&str]) {
         run(
@@ -205,6 +205,14 @@ mod opus_input {
             source: "sine=frequency=440:sample_rate=48000:duration=1.5",
             channels: "1",
             patch: Some((Some(22_050), None)),
+        },
+        Fixture {
+            // Decodes at 16 kHz with an end position that is not a whole
+            // number of 16 kHz frames, which a 16 kHz source never gives.
+            name: "head-16000-odd-length",
+            source: "sine=frequency=440:sample_rate=48000:duration=1.2341",
+            channels: "1",
+            patch: Some((Some(16_000), None)),
         },
         Fixture {
             name: "output-gain-minus-6db",
@@ -285,6 +293,46 @@ mod opus_input {
         let expected: serde_json::Value = serde_json::from_slice(&expected).unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&actual).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// Remuxes `ogg` to WebM without touching the packets. `live` writes a
+    /// segment of unknown size, as recorders do.
+    fn remux_webm(ogg: &Path, live: bool) -> std::path::PathBuf {
+        let path = ogg.with_extension(if live { "live.webm" } else { "webm" });
+        let live = if live { "1" } else { "0" };
+        let (ogg, out) = (ogg.to_str().unwrap(), path.to_str().unwrap());
+        ffmpeg(&["-i", ogg, "-c", "copy", "-live", live, out]);
+        path
+    }
+
+    /// audiowaveform reads no WebM, so the reference is its output for the Ogg
+    /// file the WebM file was remuxed from. ffmpeg carries the Ogg end
+    /// trimming over as `DiscardPadding`, but not the other way round.
+    #[test]
+    #[ignore = "needs audiowaveform and ffmpeg on PATH"]
+    fn webm_opus_matches_audiowaveform_on_the_same_packets() {
+        let dir = TempDir::new().unwrap();
+        for fixture in FIXTURES {
+            let ogg = encode(dir.path(), fixture);
+            for live in [false, true] {
+                let webm = remux_webm(&ogg, live);
+                for options in [
+                    Options::default(),
+                    options(2, Bits::Sixteen, ChannelMode::Split),
+                ] {
+                    let context = format!("{}, live {live}, {options:?}", fixture.name);
+                    let mut from_webm =
+                        WebmOpusSource::with_options(fs::File::open(&webm).unwrap(), wrap())
+                            .unwrap();
+                    let mut from_ogg =
+                        OggOpusSource::with_options(fs::File::open(&ogg).unwrap(), wrap()).unwrap();
+                    let actual = ours_dat(&mut from_webm, &options);
+                    assert_eq!(actual, ours_dat(&mut from_ogg, &options), "{context}");
+                    let expected = reference(&ogg, &[], &options, &dir.path().join("ref.dat"));
+                    assert_dat_matches(&actual, &expected, OPUS_TOLERANCE, &context);
+                }
+            }
+        }
     }
 
     /// Saturation (the default) only changes values where the decoder

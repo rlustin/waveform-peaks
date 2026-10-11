@@ -287,3 +287,120 @@ pub fn opus_stream(serial: u32, packets: u64, end_trim: u64) -> Vec<Vec<u8>> {
     }
     pages
 }
+
+pub const EBML: u32 = 0x1A45_DFA3;
+pub const DOC_TYPE: u32 = 0x4282;
+pub const SEGMENT: u32 = 0x1853_8067;
+pub const TRACKS: u32 = 0x1654_AE6B;
+pub const TRACK_ENTRY: u32 = 0xAE;
+pub const TRACK_NUMBER: u32 = 0xD7;
+pub const TRACK_TYPE: u32 = 0x83;
+pub const CODEC_ID: u32 = 0x86;
+pub const CODEC_PRIVATE: u32 = 0x63A2;
+pub const CODEC_DELAY: u32 = 0x56AA;
+pub const CONTENT_ENCODINGS: u32 = 0x6D80;
+pub const CLUSTER: u32 = 0x1F43_B675;
+pub const TIMESTAMP: u32 = 0xE7;
+pub const SIMPLE_BLOCK: u32 = 0xA3;
+pub const BLOCK_GROUP: u32 = 0xA0;
+pub const BLOCK: u32 = 0xA1;
+pub const DISCARD_PADDING: u32 = 0x75A2;
+pub const VOID: u32 = 0xEC;
+pub const CUES: u32 = 0x1C53_BB6B;
+pub const ATTACHMENTS: u32 = 0x1941_A469;
+
+/// An EBML element with a known size, encoded in as few bytes as possible.
+pub fn element(id: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = id_bytes(id);
+    let size = body.len() as u64;
+    let len = (1..=8).find(|&len| size < (1 << (7 * len)) - 1).unwrap();
+    let marked = size | 1 << (7 * len);
+    out.extend(&marked.to_be_bytes()[8 - len..]);
+    out.extend(body);
+    out
+}
+
+/// The header of an element of unknown size; its children follow.
+pub fn unknown_size(id: u32) -> Vec<u8> {
+    let mut out = id_bytes(id);
+    out.extend([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    out
+}
+
+fn id_bytes(id: u32) -> Vec<u8> {
+    let bytes = id.to_be_bytes();
+    let skip = bytes.iter().take_while(|&&byte| byte == 0).count();
+    bytes[skip..].to_vec()
+}
+
+pub fn uint_element(id: u32, value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let skip = bytes.iter().take_while(|&&byte| byte == 0).count().min(7);
+    element(id, &bytes[skip..])
+}
+
+/// The EBML header of a file with the given document type.
+pub fn ebml_header(doc_type: &str) -> Vec<u8> {
+    element(EBML, &element(DOC_TYPE, doc_type.as_bytes()))
+}
+
+/// A mono Opus track entry. `codec_delay` is in nanoseconds.
+pub fn opus_track(number: u64, pre_skip: u16, codec_delay: Option<u64>) -> Vec<u8> {
+    let mut body = [
+        uint_element(TRACK_NUMBER, number),
+        uint_element(TRACK_TYPE, 2),
+        element(CODEC_ID, b"A_OPUS"),
+        element(CODEC_PRIVATE, &opus_head(1, pre_skip)),
+    ]
+    .concat();
+    if let Some(delay) = codec_delay {
+        body.extend(uint_element(CODEC_DELAY, delay));
+    }
+    element(TRACK_ENTRY, &body)
+}
+
+/// Block body: track number, timestamp, flags, then the lacing and frames.
+/// `lacing` is 0 (none), 1 (Xiph), 2 (fixed) or 3 (EBML).
+pub fn block_body(track: u8, lacing: u8, frames: &[&[u8]]) -> Vec<u8> {
+    assert!(track < 127);
+    let mut body = vec![0x80 | track, 0, 0, 0x80 | lacing << 1];
+    if lacing != 0 {
+        body.push(frames.len() as u8 - 1);
+    }
+    let laced_sizes = &frames[..frames.len() - 1];
+    match lacing {
+        0 => assert_eq!(frames.len(), 1),
+        1 => {
+            for frame in laced_sizes {
+                body.extend(vec![255; frame.len() / 255]);
+                body.push((frame.len() % 255) as u8);
+            }
+        }
+        2 => assert!(frames.iter().all(|frame| frame.len() == frames[0].len())),
+        _ => {
+            let mut previous = None;
+            for frame in laced_sizes {
+                let size = frame.len() as i64;
+                body.extend(match previous {
+                    None => ebml_lace_size(size as u64),
+                    Some(previous) => ebml_lace_size((size - previous + 8191) as u64),
+                });
+                previous = Some(size);
+            }
+        }
+    }
+    for frame in frames {
+        body.extend(*frame);
+    }
+    body
+}
+
+/// A two-byte EBML lacing size, biased by the caller for differences.
+fn ebml_lace_size(value: u64) -> Vec<u8> {
+    assert!(value < 0x3FFF);
+    vec![0x40 | (value >> 8) as u8, value as u8]
+}
+
+pub fn ns_for_48k_frames(frames: u64) -> u64 {
+    frames * 1_000_000_000 / 48_000
+}

@@ -13,3 +13,5 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Sinks for the audiowaveform `.dat` and JSON formats, and an in-memory sink.
 - Raw 16-bit PCM input.
 - Ogg Opus input through libopus, behind the default `opus` feature.
+- Opus input from WebM and Matroska, including browser `MediaRecorder`
+  recordings.

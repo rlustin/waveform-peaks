@@ -4,14 +4,20 @@
 mod ogg_opus;
 #[cfg(feature = "opus")]
 mod opus;
+#[cfg(feature = "opus")]
+mod webm_opus;
 
 use std::fmt;
+#[cfg(feature = "opus")]
+use std::io::{self, BufReader};
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]
 pub use opus::{DecodeRate, OpusOptions, Overflow};
+#[cfg(feature = "opus")]
+pub use webm_opus::WebmOpusSource;
 
 use crate::Error;
 
@@ -133,4 +139,53 @@ pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize
 #[cfg(feature = "opus")]
 pub(crate) fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
+}
+
+/// Buffers a plain `Read` and counts the bytes consumed, so that containers
+/// can tell where a parent of known size ends without `Seek`.
+#[cfg(feature = "opus")]
+pub(crate) struct CountingReader<R> {
+    reader: BufReader<R>,
+    position: u64,
+    /// Error message for input that ends inside a structure.
+    truncated: &'static str,
+}
+
+#[cfg(feature = "opus")]
+impl<R: Read> CountingReader<R> {
+    pub(crate) fn new(reader: R, truncated: &'static str) -> Self {
+        CountingReader {
+            reader: BufReader::new(reader),
+            position: 0,
+            truncated,
+        }
+    }
+
+    /// Bytes consumed so far.
+    pub(crate) fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// Reads until `buf` is full or the input ends. Returns the byte count.
+    pub(crate) fn read_full(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let read = read_full(&mut self.reader, buf)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+
+    pub(crate) fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        if self.read_full(buf)? < buf.len() {
+            return Err(invalid(self.truncated));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn skip(&mut self, len: u64) -> Result<(), Error> {
+        let skipped = io::copy(&mut (&mut self.reader).take(len), &mut io::sink())?;
+        self.position += skipped;
+        if skipped < len {
+            return Err(invalid(self.truncated));
+        }
+        Ok(())
+    }
 }
