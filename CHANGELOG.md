@@ -15,4 +15,5 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ogg Opus input through libopus, behind the default `opus` feature.
 - Opus input from WebM and Matroska, including browser `MediaRecorder`
   recordings.
-- AAC input from ADTS, behind the optional `aac` feature.
+- AAC input from MP4 (fragmented or with the `moov` box first) and ADTS,
+  behind the optional `aac` feature.

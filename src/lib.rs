@@ -7,7 +7,8 @@
 //!
 //! Sources are [`RawPcmSource`] for raw PCM; with the default `opus` feature,
 //! [`OggOpusSource`] and [`WebmOpusSource`] for Opus in Ogg, WebM and Matroska;
-//! and with the optional `aac` feature, `AdtsAacSource` for AAC in ADTS.
+//! and with the optional `aac` feature, `Mp4AacSource` and `AdtsAacSource` for
+//! AAC in MP4 and ADTS.
 //!
 //! For the same options the output matches BBC audiowaveform byte for byte on
 //! PCM input. On Opus input with `Overflow::Wrap` it is within ±1 per value,
@@ -70,7 +71,7 @@ pub use error::Error;
 pub use options::{Bits, ChannelMode, Limits, Options};
 pub use sink::{DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
 #[cfg(feature = "aac")]
-pub use source::AdtsAacSource;
+pub use source::{AdtsAacSource, Mp4AacSource, Mp4Options};
 #[cfg(feature = "opus")]
 pub use source::{DecodeRate, OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
 pub use source::{PcmSource, RawPcmSource};

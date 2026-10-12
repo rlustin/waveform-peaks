@@ -374,7 +374,8 @@ mod opus_input {
 #[cfg(feature = "aac")]
 mod aac_input {
     use super::*;
-    use waveform_peaks::{AdtsAacSource, RawPcmSource};
+    use std::process::Command;
+    use waveform_peaks::{AdtsAacSource, Mp4AacSource, RawPcmSource};
 
     /// Largest accepted per-sample difference. Both decoders work in floating
     /// point and round a few samples in ten thousand differently.
@@ -385,6 +386,7 @@ mod aac_input {
         source: &'static str,
         channels: u16,
         rate: u32,
+        seconds: f64,
     }
 
     const FIXTURES: &[Fixture] = &[
@@ -393,50 +395,90 @@ mod aac_input {
             source: "sine=frequency=440:sample_rate=44100:duration=1.013",
             channels: 1,
             rate: 44_100,
+            seconds: 1.013,
         },
         Fixture {
             name: "stereo-48k-odd-length",
             source: "aevalsrc=exprs=0.5*sin(440*2*PI*t)|0.3*sin(660*2*PI*t)+0.1*sin(5000*2*PI*t):s=48000:d=1.2345",
             channels: 2,
             rate: 48_000,
+            seconds: 1.2345,
         },
         Fixture {
             name: "noise-16k",
             source: "anoisesrc=d=2.1:c=pink:r=16000:a=0.5:seed=42",
             channels: 1,
             rate: 16_000,
+            seconds: 2.1,
         },
         Fixture {
             name: "clipping-square",
             source: "aevalsrc=exprs=sgn(sin(440*2*PI*t)):s=48000:d=1",
             channels: 1,
             rate: 48_000,
+            seconds: 1.0,
         },
     ];
 
-    fn encode(dir: &Path, fixture: &Fixture) -> std::path::PathBuf {
-        let path = dir.join(format!("{}.aac", fixture.name));
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Layout {
+        Adts,
+        FastStart,
+        Fragmented,
+        /// Apple's encoder, as Safari records with: iTunSMPB, no edit list.
+        Apple,
+    }
+
+    /// Encodes `fixture`, or `None` when the layout needs a missing tool.
+    fn encode(dir: &Path, fixture: &Fixture, layout: Layout) -> Option<std::path::PathBuf> {
+        let extension = if layout == Layout::Adts { "aac" } else { "m4a" };
+        let path = dir.join(format!("{}-{layout:?}.{extension}", fixture.name));
+        let out = path.to_str().unwrap();
         let channels = fixture.channels.to_string();
-        ffmpeg(&[
+        let input = [
             "-f",
             "lavfi",
             "-i",
             fixture.source,
             "-ac",
             channels.as_str(),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "96k",
-            "-f",
-            "adts",
-            path.to_str().unwrap(),
-        ]);
-        path
+        ];
+        let aac = ["-c:a", "aac", "-b:a", "96k"];
+        match layout {
+            Layout::Adts => ffmpeg(&[&input[..], &aac, &["-f", "adts", out]].concat()),
+            Layout::FastStart => {
+                ffmpeg(&[&input[..], &aac, &["-movflags", "+faststart", out]].concat())
+            }
+            Layout::Fragmented => ffmpeg(
+                &[
+                    &input[..],
+                    &aac,
+                    &["-movflags", "frag_keyframe+empty_moov+default_base_moof"],
+                    &["-frag_duration", "300000", out],
+                ]
+                .concat(),
+            ),
+            Layout::Apple => {
+                let afconvert = tool("AFCONVERT", "afconvert");
+                if Command::new(&afconvert).arg("-h").output().is_err() {
+                    return None;
+                }
+                let wav = dir.join(format!("{}.wav", fixture.name));
+                let wav = wav.to_str().unwrap();
+                ffmpeg(&[&input[..], &[wav]].concat());
+                run(&afconvert, ["-f", "m4af", "-d", "aac", wav, out]);
+            }
+        }
+        Some(path)
     }
 
-    fn decode_ours(path: &Path) -> (Vec<i16>, u32, u16) {
-        let mut source = AdtsAacSource::new(fs::File::open(path).unwrap()).unwrap();
+    fn decode_ours(path: &Path, layout: Layout) -> (Vec<i16>, u32, u16) {
+        let file = fs::File::open(path).unwrap();
+        let mut source: Box<dyn PcmSource> = if layout == Layout::Adts {
+            Box::new(AdtsAacSource::new(file).unwrap())
+        } else {
+            Box::new(Mp4AacSource::new(file).unwrap())
+        };
         let mut samples = Vec::new();
         while let Some(block) = source.next_block().unwrap() {
             samples.extend(block);
@@ -478,38 +520,65 @@ mod aac_input {
     }
 
     #[test]
-    #[ignore = "needs ffmpeg on PATH"]
+    #[ignore = "needs ffmpeg on PATH (and afconvert for Apple's encoder)"]
     fn aac_matches_ffmpeg() {
         let dir = TempDir::new().unwrap();
         for fixture in FIXTURES {
-            let path = encode(dir.path(), fixture);
-            let context = fixture.name;
-            let (ours, rate, channels) = decode_ours(&path);
-            assert_eq!(
-                (rate, channels),
-                (fixture.rate, fixture.channels),
-                "{context}"
-            );
-            let theirs = decode_ffmpeg(dir.path(), &path);
-            // ADTS records no priming or padding: both decode every frame.
-            assert_eq!(ours.len(), theirs.len(), "{context}");
-            let theirs = &theirs[..ours.len()];
-            let worst = ours
-                .iter()
-                .zip(theirs)
-                .map(|(&a, &b)| (a as i32 - b as i32).abs())
-                .max()
-                .unwrap_or(0);
-            assert!(
-                worst <= AAC_TOLERANCE,
-                "{context}: samples differ by {worst}"
-            );
-            assert_dat_matches(
-                &peaks(&ours, rate, channels),
-                &peaks(theirs, rate, channels),
-                AAC_TOLERANCE,
-                context,
-            );
+            for layout in [
+                Layout::Adts,
+                Layout::FastStart,
+                Layout::Fragmented,
+                Layout::Apple,
+            ] {
+                let Some(path) = encode(dir.path(), fixture, layout) else {
+                    eprintln!("skipping {layout:?}: afconvert not found");
+                    continue;
+                };
+                let context = format!("{}, {layout:?}", fixture.name);
+                let (ours, rate, channels) = decode_ours(&path, layout);
+                assert_eq!(
+                    (rate, channels),
+                    (fixture.rate, fixture.channels),
+                    "{context}"
+                );
+                let theirs = decode_ffmpeg(dir.path(), &path);
+                let frames = ours.len() / channels as usize;
+                match layout {
+                    // Nothing to trim: both decode every frame.
+                    Layout::Adts | Layout::Fragmented => {
+                        assert_eq!(ours.len(), theirs.len(), "{context}")
+                    }
+                    // FFmpeg trims the priming but keeps the end padding,
+                    // which this crate drops. FFmpeg's edit list stores the
+                    // length in milliseconds.
+                    Layout::FastStart | Layout::Apple => {
+                        let expected = fixture.seconds * rate as f64;
+                        let slack = rate as f64 / 1000.0;
+                        assert!(
+                            (frames as f64 - expected).abs() <= slack,
+                            "{context}: {frames} frames"
+                        );
+                        assert!(ours.len() <= theirs.len(), "{context}");
+                    }
+                }
+                let theirs = &theirs[..ours.len()];
+                let worst = ours
+                    .iter()
+                    .zip(theirs)
+                    .map(|(&a, &b)| (a as i32 - b as i32).abs())
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= AAC_TOLERANCE,
+                    "{context}: samples differ by {worst}"
+                );
+                assert_dat_matches(
+                    &peaks(&ours, rate, channels),
+                    &peaks(theirs, rate, channels),
+                    AAC_TOLERANCE,
+                    &context,
+                );
+            }
         }
     }
 }

@@ -9,15 +9,17 @@ and JSON) from streamed audio. Draft.
 PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSink
 (OggOpusSource,             (min/max per             (DatWriter, JsonWriter,
  WebmOpusSource,             output channel)          MemorySink)
+ Mp4AacSource,
  AdtsAacSource,
  RawPcmSource)
 ```
 
 - **`PcmSource`** returns one decoded block at a time, borrowed from its own
   buffer. `OggOpusSource` and `WebmOpusSource` read with plain `Read`, so an
-  upload body can be decoded as it arrives, and so does `AdtsAacSource`.
+  upload body can be decoded as it arrives, and so do the AAC readers.
   `WebmOpusSource` also reads Matroska, and browser `MediaRecorder` recordings,
-  whose clusters have no size.
+  whose clusters have no size. `Mp4AacSource` reads fragmented MP4, as Safari
+  records, and MP4 with the `moov` box first.
 - **`PeakBuilder`** keeps one `(min, max)` accumulator per output channel.
 - **`PeakSink`** receives each point as it completes. `DatWriter` patches the
   length field at the end (needs `Seek`). `JsonWriter` writes `length` after
@@ -52,7 +54,7 @@ compiler. Without it, only raw PCM input is available:
 waveform-peaks = { version = "0.1", default-features = false }
 ```
 
-The optional `aac` feature decodes AAC-LC from ADTS with Symphonia's
+The optional `aac` feature decodes AAC-LC from MP4 and ADTS with Symphonia's
 pure-Rust decoder. Symphonia is MPL-2.0 (see License), so the feature is off
 by default:
 
@@ -82,8 +84,10 @@ audiowaveform does not read WebM. `WebmOpusSource` takes the pre-skip from
 gives exactly the output of `OggOpusSource`.
 
 audiowaveform does not read AAC either, so AAC output is compared with FFmpeg's
-decoder instead, within ±1 per sample. ADTS records no encoder priming or
-padding, so nothing is trimmed. Symphonia decodes AAC-LC only: HE-AAC decodes as its AAC-LC core, at half the sample rate
+decoder instead, within ±1 per sample. The encoder priming and padding are
+trimmed using the MP4 edit list, or Apple's `iTunSMPB` tag without one; FFmpeg
+trims the priming only. ADTS records neither, so nothing is trimmed. Symphonia
+decodes AAC-LC only: HE-AAC decodes as its AAC-LC core, at half the sample rate
 and without the top of the spectrum.
 
 `Overflow::Saturate` is the default because wrapping makes clipped audio read
@@ -102,7 +106,7 @@ cargo clippy --no-default-features --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, adts_aac
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4_aac, adts_aac
 ```
 
 GitHub Actions runs all of these except the oracle tests on every push and pull
@@ -132,7 +136,8 @@ set `AUDIOWAVEFORM` and `FFMPEG`. They compare:
 - the same fixtures remuxed to WebM, with known and unknown segment sizes:
   exactly equal to this crate's Ogg output, and to audiowaveform's within the
   Opus tolerance;
-- AAC encoded by FFmpeg as ADTS, against FFmpeg's decoder.
+- AAC encoded by FFmpeg as ADTS, fast-start MP4 and fragmented MP4, and by
+  Apple's `afconvert` when available, against FFmpeg's decoder.
 
 Opus comparisons allow ±1 per value. The `opus` crate bundles its own libopus
 build, whose float output differs in the last bit from Homebrew's. Decoding
@@ -147,7 +152,8 @@ exactly.
   rejected, since only the stream of the first page is decoded.
 - Other formats (WAV, FLAC, MP3, Vorbis) through Symphonia, whose format
   crates would each need an MPL-2.0 exception in `deny.toml`.
-- AAC in MP4, as Safari records it.
+- MP4 with its media data before the `moov` box, as FFmpeg and phones write by
+  default: it needs a `Read + Seek` constructor for files spooled to disk.
 - HE-AAC's SBR and parametric stereo layers, which Symphonia does not decode.
 - AAC in Matroska or WebM, and Opus in MP4 (Chrome can record both).
 - Matroska beyond what recorders write: compressed or encrypted tracks, and

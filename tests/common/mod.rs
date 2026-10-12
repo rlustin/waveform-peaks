@@ -426,3 +426,384 @@ pub fn adts_frames(adts: &[u8]) -> ([u8; 2], Vec<Vec<u8>>) {
     }
     (config, frames)
 }
+
+pub fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = (8 + body.len() as u32).to_be_bytes().to_vec();
+    out.extend(kind);
+    out.extend(body);
+    out
+}
+
+pub fn full_box(kind: &[u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
+    let mut full = (flags | (version as u32) << 24).to_be_bytes().to_vec();
+    full.extend(body);
+    mp4_box(kind, &full)
+}
+
+/// An MPEG-4 descriptor, with its size in the four-byte form FFmpeg writes.
+fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag, 0x80, 0x80, 0x80, body.len() as u8];
+    out.extend(body);
+    out
+}
+
+pub fn esds(object_type: u8, config: &[u8]) -> Vec<u8> {
+    let mut decoder_config = vec![object_type, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    decoder_config.extend(descriptor(0x05, config));
+    let mut es = vec![0, 1, 0];
+    es.extend(descriptor(0x04, &decoder_config));
+    es.extend(descriptor(0x06, &[2]));
+    full_box(b"esds", 0, 0, &descriptor(0x03, &es))
+}
+
+/// An audio sample entry such as `mp4a`, with the given child boxes.
+pub fn audio_sample_entry(kind: &[u8; 4], channels: u16, rate: u32, children: &[u8]) -> Vec<u8> {
+    let mut body = vec![0; 6];
+    body.extend(1u16.to_be_bytes());
+    body.extend([0; 8]);
+    body.extend(channels.to_be_bytes());
+    body.extend(16u16.to_be_bytes());
+    body.extend([0; 4]);
+    body.extend((rate << 16).to_be_bytes());
+    body.extend(children);
+    mp4_box(kind, &body)
+}
+
+pub fn mp4a(config: &[u8], channels: u16, rate: u32) -> Vec<u8> {
+    audio_sample_entry(b"mp4a", channels, rate, &esds(0x40, config))
+}
+
+/// A track of an MP4 file built by [`faststart_mp4`] or [`fragmented_mp4`].
+pub struct Mp4Track {
+    pub id: u32,
+    pub handler: [u8; 4],
+    pub sample_entry: Vec<u8>,
+    /// Media timescale.
+    pub timescale: u32,
+    /// First edit: duration in the movie timescale, media time.
+    pub edit: Option<(u64, i64)>,
+    /// Samples in storage order, grouped in chunks.
+    pub chunks: Vec<Vec<Vec<u8>>>,
+    pub wide_offsets: bool,
+    /// Adds the data handler QuickTime files have in `minf`.
+    pub quicktime: bool,
+}
+
+impl Mp4Track {
+    pub fn audio(
+        config: &[u8],
+        channels: u16,
+        rate: u32,
+        samples: &[Vec<u8>],
+        per_chunk: usize,
+    ) -> Self {
+        Mp4Track {
+            id: 1,
+            handler: *b"soun",
+            sample_entry: mp4a(config, channels, rate),
+            timescale: rate,
+            edit: None,
+            chunks: samples.chunks(per_chunk).map(<[_]>::to_vec).collect(),
+            wide_offsets: false,
+            quicktime: false,
+        }
+    }
+
+    fn trak(&self, chunk_offsets: &[u64]) -> Vec<u8> {
+        let mut tkhd = vec![0; 8];
+        tkhd.extend(self.id.to_be_bytes());
+        tkhd.resize(80, 0);
+        let mut edts = Vec::new();
+        if let Some((duration, media_time)) = self.edit {
+            let mut elst = 1u32.to_be_bytes().to_vec();
+            elst.extend((duration as u32).to_be_bytes());
+            elst.extend((media_time as i32).to_be_bytes());
+            elst.extend(0x0001_0000u32.to_be_bytes());
+            edts = mp4_box(b"edts", &full_box(b"elst", 0, 0, &elst));
+        }
+        let mut mdhd = vec![0; 8];
+        mdhd.extend(self.timescale.to_be_bytes());
+        mdhd.extend([0, 0, 0, 0, 0x55, 0xC4, 0, 0]);
+        let mut hdlr = vec![0; 4];
+        hdlr.extend(self.handler);
+        hdlr.extend([0; 13]);
+
+        let mut stsc = Vec::new();
+        let mut runs = 0u32;
+        let mut previous = None;
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            if previous != Some(chunk.len()) {
+                stsc.extend((index as u32 + 1).to_be_bytes());
+                stsc.extend((chunk.len() as u32).to_be_bytes());
+                stsc.extend(1u32.to_be_bytes());
+                runs += 1;
+                previous = Some(chunk.len());
+            }
+        }
+        let mut stsc_body = runs.to_be_bytes().to_vec();
+        stsc_body.extend(stsc);
+        let sizes: Vec<u32> = self
+            .chunks
+            .iter()
+            .flatten()
+            .map(|s| s.len() as u32)
+            .collect();
+        let mut stsz = 0u32.to_be_bytes().to_vec();
+        stsz.extend((sizes.len() as u32).to_be_bytes());
+        for size in &sizes {
+            stsz.extend(size.to_be_bytes());
+        }
+        let mut offsets = (chunk_offsets.len() as u32).to_be_bytes().to_vec();
+        for &offset in chunk_offsets {
+            if self.wide_offsets {
+                offsets.extend(offset.to_be_bytes());
+            } else {
+                offsets.extend((offset as u32).to_be_bytes());
+            }
+        }
+        let offsets_kind = if self.wide_offsets { b"co64" } else { b"stco" };
+        let mut stsd = 1u32.to_be_bytes().to_vec();
+        stsd.extend(&self.sample_entry);
+        let stbl = [
+            full_box(b"stsd", 0, 0, &stsd),
+            full_box(b"stts", 0, 0, &0u32.to_be_bytes()),
+            full_box(b"stsc", 0, 0, &stsc_body),
+            full_box(b"stsz", 0, 0, &stsz),
+            full_box(offsets_kind, 0, 0, &offsets),
+        ]
+        .concat();
+        let mut minf = Vec::new();
+        if self.quicktime {
+            let mut dhlr = b"dhlralis".to_vec();
+            dhlr.extend([0; 13]);
+            minf = full_box(b"hdlr", 0, 0, &dhlr);
+        }
+        minf.extend(mp4_box(b"stbl", &stbl));
+        let mdia = [
+            full_box(b"mdhd", 0, 0, &mdhd),
+            full_box(b"hdlr", 0, 0, &hdlr),
+            mp4_box(b"minf", &minf),
+        ]
+        .concat();
+        mp4_box(
+            b"trak",
+            &[
+                full_box(b"tkhd", 0, 3, &tkhd),
+                edts,
+                mp4_box(b"mdia", &mdia),
+            ]
+            .concat(),
+        )
+    }
+}
+
+fn ftyp() -> Vec<u8> {
+    mp4_box(b"ftyp", b"M4A \0\0\0\0M4A mp42isom")
+}
+
+fn moov(movie_timescale: u32, traks: &[Vec<u8>], extra: &[u8]) -> Vec<u8> {
+    let mut mvhd = vec![0; 8];
+    mvhd.extend(movie_timescale.to_be_bytes());
+    mvhd.resize(96, 0);
+    mp4_box(
+        b"moov",
+        &[
+            full_box(b"mvhd", 0, 0, &mvhd),
+            traks.concat(),
+            extra.to_vec(),
+        ]
+        .concat(),
+    )
+}
+
+/// A non-fragmented MP4 file with its moov box first. Chunks of the tracks are
+/// stored in turn, `extra` goes at the end of the moov box, and `between`
+/// between the moov and mdat boxes.
+pub fn faststart_mp4(
+    tracks: &[Mp4Track],
+    movie_timescale: u32,
+    extra: &[u8],
+    between: &[u8],
+) -> Vec<u8> {
+    let build = |offsets: &[Vec<u64>]| {
+        let traks: Vec<Vec<u8>> = tracks.iter().zip(offsets).map(|(t, o)| t.trak(o)).collect();
+        moov(movie_timescale, &traks, extra)
+    };
+    let placeholder: Vec<Vec<u64>> = tracks.iter().map(|t| vec![0; t.chunks.len()]).collect();
+    let data_start = (ftyp().len() + build(&placeholder).len() + between.len() + 8) as u64;
+    let mut offsets = vec![Vec::new(); tracks.len()];
+    let mut mdat = Vec::new();
+    let rounds = tracks.iter().map(|t| t.chunks.len()).max().unwrap_or(0);
+    for round in 0..rounds {
+        for (index, track) in tracks.iter().enumerate() {
+            if let Some(chunk) = track.chunks.get(round) {
+                offsets[index].push(data_start + mdat.len() as u64);
+                mdat.extend(chunk.concat());
+            }
+        }
+    }
+    [
+        ftyp(),
+        build(&offsets),
+        between.to_vec(),
+        mp4_box(b"mdat", &mdat),
+    ]
+    .concat()
+}
+
+/// A fragmented MP4 file: an empty moov box, then a moof and mdat box per
+/// fragment. Samples are addressed from the moof box (`default-base-is-moof`)
+/// or, with `explicit_base`, through a base data offset.
+pub fn fragmented_mp4(
+    track: &Mp4Track,
+    fragments: &[Vec<Vec<u8>>],
+    explicit_base: bool,
+) -> Vec<u8> {
+    let empty = Mp4Track {
+        id: track.id,
+        handler: track.handler,
+        sample_entry: track.sample_entry.clone(),
+        timescale: track.timescale,
+        edit: track.edit,
+        chunks: Vec::new(),
+        wide_offsets: false,
+        quicktime: track.quicktime,
+    };
+    let mut trex = track.id.to_be_bytes().to_vec();
+    trex.extend([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mvex = mp4_box(b"mvex", &full_box(b"trex", 0, 0, &trex));
+    let mut out = [ftyp(), moov(1000, &[empty.trak(&[])], &mvex)].concat();
+    for (sequence, samples) in fragments.iter().enumerate() {
+        let build = |data_offset: u32, base: u64| {
+            let mut tfhd = track.id.to_be_bytes().to_vec();
+            let flags = if explicit_base {
+                tfhd.extend(base.to_be_bytes());
+                0x1
+            } else {
+                0x2_0000
+            };
+            let mut trun = (samples.len() as u32).to_be_bytes().to_vec();
+            trun.extend(data_offset.to_be_bytes());
+            for sample in samples {
+                trun.extend((sample.len() as u32).to_be_bytes());
+            }
+            let traf = [
+                full_box(b"tfhd", 0, flags, &tfhd),
+                full_box(b"trun", 0, 0x201, &trun),
+            ]
+            .concat();
+            mp4_box(
+                b"moof",
+                &[
+                    full_box(b"mfhd", 0, 0, &(sequence as u32 + 1).to_be_bytes()),
+                    mp4_box(b"traf", &traf),
+                ]
+                .concat(),
+            )
+        };
+        let moof_start = out.len() as u64;
+        let moof_len = build(0, 0).len();
+        let data_start = moof_start + moof_len as u64 + 8;
+        let moof = if explicit_base {
+            build(0, data_start)
+        } else {
+            build((moof_len + 8) as u32, 0)
+        };
+        out.extend(moof);
+        out.extend(mp4_box(b"mdat", &samples.concat()));
+    }
+    out
+}
+
+/// The samples of the first track of a non-fragmented MP4 file, and its
+/// `AudioSpecificConfig`.
+pub fn mp4_samples(file: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    fn find<'a>(mut data: &'a [u8], path: &[&[u8; 4]]) -> &'a [u8] {
+        for kind in path {
+            loop {
+                let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+                if &data[4..8] == *kind {
+                    data = &data[8..size];
+                    break;
+                }
+                data = &data[size..];
+            }
+        }
+        data
+    }
+    let be = |data: &[u8], at: usize| u32::from_be_bytes(data[at..at + 4].try_into().unwrap());
+    let stbl = find(file, &[b"moov", b"trak", b"mdia", b"minf", b"stbl"]);
+    let entry = &find(stbl, &[b"stsd"])[8..];
+    let esds = &entry[entry.windows(4).position(|w| w == b"esds").unwrap() + 4..];
+    let config_tag = esds
+        .windows(2)
+        .position(|w| w[0] == 0x05 && w[1] & 0x80 != 0)
+        .unwrap();
+    let config_len = esds[config_tag + 4] as usize;
+    let config = esds[config_tag + 5..config_tag + 5 + config_len].to_vec();
+    let stsz = find(stbl, &[b"stsz"]);
+    let sizes: Vec<usize> = (0..be(stsz, 8) as usize)
+        .map(|i| be(stsz, 12 + i * 4) as usize)
+        .collect();
+    let stco = find(stbl, &[b"stco"]);
+    let offsets: Vec<usize> = (0..be(stco, 4) as usize)
+        .map(|i| be(stco, 8 + i * 4) as usize)
+        .collect();
+    let stsc = find(stbl, &[b"stsc"]);
+    let runs: Vec<(usize, usize)> = (0..be(stsc, 4) as usize)
+        .map(|i| {
+            (
+                be(stsc, 8 + i * 12) as usize,
+                be(stsc, 12 + i * 12) as usize,
+            )
+        })
+        .collect();
+    let mut samples = Vec::new();
+    let mut sizes = sizes.into_iter();
+    for (chunk, &offset) in offsets.iter().enumerate() {
+        let per_chunk = runs
+            .iter()
+            .rev()
+            .find(|(first, _)| chunk + 1 >= *first)
+            .unwrap()
+            .1;
+        let mut at = offset;
+        for size in sizes.by_ref().take(per_chunk) {
+            samples.push(file[at..at + size].to_vec());
+            at += size;
+        }
+    }
+    (config, samples)
+}
+
+/// A `udta` box holding an `iTunSMPB` tag, after a large cover art item.
+/// `iso_meta` gives `meta` the full-box header of ISO files rather than
+/// QuickTime's bare form.
+pub fn itunsmpb_udta(priming: u32, padding: u32, length: u64, iso_meta: bool) -> Vec<u8> {
+    let text = format!(" 00000000 {priming:08X} {padding:08X} {length:016X} 00000000");
+    let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+    data.extend(text.as_bytes());
+    let mut name = vec![0; 4];
+    name.extend(b"iTunSMPB");
+    let mut mean = vec![0; 4];
+    mean.extend(b"com.apple.iTunes");
+    let item = mp4_box(
+        b"----",
+        &[
+            mp4_box(b"mean", &mean),
+            mp4_box(b"name", &name),
+            mp4_box(b"data", &data),
+        ]
+        .concat(),
+    );
+    let cover = mp4_box(b"covr", &mp4_box(b"data", &vec![0xAB; 100_000]));
+    let ilst = mp4_box(b"ilst", &[cover, item].concat());
+    let hdlr = full_box(b"hdlr", 0, 0, b"\0\0\0\0mdirappl\0\0\0\0\0\0\0\0\0");
+    let meta_body = [hdlr, ilst].concat();
+    let meta = if iso_meta {
+        full_box(b"meta", 0, 0, &meta_body)
+    } else {
+        mp4_box(b"meta", &meta_body)
+    };
+    mp4_box(b"udta", &meta)
+}

@@ -4,6 +4,8 @@
 mod aac;
 #[cfg(feature = "aac")]
 mod adts_aac;
+#[cfg(feature = "aac")]
+mod mp4_aac;
 #[cfg(feature = "opus")]
 mod ogg_opus;
 #[cfg(feature = "opus")]
@@ -12,12 +14,14 @@ mod opus;
 mod webm_opus;
 
 use std::fmt;
-#[cfg(feature = "opus")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 use std::io::{self, BufReader};
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "aac")]
 pub use adts_aac::AdtsAacSource;
+#[cfg(feature = "aac")]
+pub use mp4_aac::{Mp4AacSource, Mp4Options};
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]
@@ -142,14 +146,14 @@ pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize
     Ok(filled)
 }
 
-#[cfg(feature = "opus")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 pub(crate) fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
 }
 
 /// Buffers a plain `Read` and counts the bytes consumed, so that containers
 /// can tell where a parent of known size ends without `Seek`.
-#[cfg(feature = "opus")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 pub(crate) struct CountingReader<R> {
     reader: BufReader<R>,
     position: u64,
@@ -157,7 +161,7 @@ pub(crate) struct CountingReader<R> {
     truncated: &'static str,
 }
 
-#[cfg(feature = "opus")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 impl<R: Read> CountingReader<R> {
     pub(crate) fn new(reader: R, truncated: &'static str) -> Self {
         CountingReader {
@@ -192,6 +196,12 @@ impl<R: Read> CountingReader<R> {
         if skipped < len {
             return Err(invalid(self.truncated));
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "aac")]
+    pub(crate) fn skip_to_end(&mut self) -> Result<(), Error> {
+        self.position += io::copy(&mut self.reader, &mut io::sink())?;
         Ok(())
     }
 }

@@ -1,4 +1,5 @@
-//! ADTS decoding of small fixtures.
+//! AAC framing on MP4 files built in memory around frames from small ADTS
+//! fixtures.
 
 #![cfg(feature = "aac")]
 
@@ -7,10 +8,16 @@ mod common;
 use std::io::{self, Cursor, Read};
 
 use common::*;
-use waveform_peaks::{AdtsAacSource, Error, PcmSource};
+use waveform_peaks::{AdtsAacSource, Error, Mp4AacSource, Mp4Options, PcmSource};
 
 const MONO: &[u8] = include_bytes!("data/sine-mono-44100.aac");
 const STEREO: &[u8] = include_bytes!("data/chord-stereo-48000.aac");
+/// HE-AAC from Apple's encoder, which signals SBR only inside the frames.
+const HE_AAC: &[u8] = include_bytes!("data/he-aac-apple.m4a");
+
+/// The fixture lasts 1.013 s at 44.1 kHz.
+const MONO_LENGTH: u64 = 44_673;
+const PRIMING: u64 = 1024;
 
 fn samples<P: PcmSource>(mut source: P) -> Result<Vec<i16>, Error> {
     let mut samples = Vec::new();
@@ -18,6 +25,14 @@ fn samples<P: PcmSource>(mut source: P) -> Result<Vec<i16>, Error> {
         samples.extend(block);
     }
     Ok(samples)
+}
+
+fn mp4(bytes: Vec<u8>) -> Result<Vec<i16>, Error> {
+    mp4_with(bytes, Mp4Options::default())
+}
+
+fn mp4_with(bytes: Vec<u8>, options: Mp4Options) -> Result<Vec<i16>, Error> {
+    samples(Mp4AacSource::with_options(Cursor::new(bytes), options)?)
 }
 
 fn adts(bytes: &[u8]) -> Vec<i16> {
@@ -30,6 +45,11 @@ fn assert_same(actual: &[i16], expected: &[i16]) {
     assert_eq!(actual.len(), expected.len(), "sample count");
     let first_difference = actual.iter().zip(expected).position(|(a, e)| a != e);
     assert_eq!(first_difference, None, "first differing sample");
+}
+
+fn mono_track(per_chunk: usize) -> Mp4Track {
+    let (config, frames) = adts_frames(MONO);
+    Mp4Track::audio(&config, 1, 44_100, &frames, per_chunk)
 }
 
 #[test]
@@ -84,13 +104,325 @@ fn adts_stops_at_a_trailing_tag() {
 }
 
 #[test]
-fn rejects_other_inputs() {
-    let result = AdtsAacSource::new(Cursor::new(opus_like_garbage()));
+fn mp4_matches_adts_with_the_same_frames() {
+    for per_chunk in [1, 7, 1000] {
+        let file = faststart_mp4(&[mono_track(per_chunk)], 1000, &[], &[]);
+        assert_same(&mp4(file).unwrap(), &adts(MONO));
+    }
+    let (config, frames) = adts_frames(STEREO);
+    let track = Mp4Track::audio(&config, 2, 48_000, &frames, 5);
+    let file = faststart_mp4(&[track], 1000, &[], &[]);
+    assert_same(&mp4(file).unwrap(), &adts(STEREO));
+}
+
+#[test]
+fn edit_list_trims_priming_and_padding() {
+    let mut track = mono_track(10);
+    track.edit = Some((1013, PRIMING as i64));
+    let file = faststart_mp4(&[track], 1000, &[], &[]);
+    let expected = &adts(MONO)[PRIMING as usize..(PRIMING + MONO_LENGTH) as usize];
+    assert_same(&mp4(file).unwrap(), expected);
+}
+
+/// Apple's encoder records priming and length only in an `iTunSMPB` tag.
+#[test]
+fn itunsmpb_trims_without_an_edit_list() {
+    let expected = &adts(MONO)[PRIMING as usize..(PRIMING + MONO_LENGTH) as usize];
+    for iso_meta in [false, true] {
+        let udta = itunsmpb_udta(PRIMING as u32, 383, MONO_LENGTH, iso_meta);
+        let file = faststart_mp4(&[mono_track(10)], 1000, &udta, &[]);
+        // The cover art in front of the tag is read past, not buffered.
+        let mut options = Mp4Options::default();
+        options.max_table_bytes = 10_000;
+        assert_same(&mp4_with(file, options).unwrap(), expected);
+    }
+}
+
+#[test]
+fn edit_list_takes_precedence_over_itunsmpb() {
+    let mut track = mono_track(10);
+    track.edit = Some((1013, PRIMING as i64));
+    let udta = itunsmpb_udta(2112, 0, 1000, true);
+    let file = faststart_mp4(&[track], 1000, &udta, &[]);
+    let expected = &adts(MONO)[PRIMING as usize..(PRIMING + MONO_LENGTH) as usize];
+    assert_same(&mp4(file).unwrap(), expected);
+}
+
+/// Recorders write fragments, each with its own moof and mdat box.
+#[test]
+fn reads_fragmented_files() {
+    let (_, frames) = adts_frames(MONO);
+    let fragments: Vec<Vec<Vec<u8>>> = frames.chunks(13).map(<[_]>::to_vec).collect();
+    for explicit_base in [false, true] {
+        let file = fragmented_mp4(&mono_track(1), &fragments, explicit_base);
+        assert_same(&mp4(file).unwrap(), &adts(MONO));
+    }
+}
+
+/// A `moof` box whose run lists no sample sizes, only a count of samples of
+/// `default_size` set by the track fragment header, then its `mdat` box.
+fn default_size_fragment(track_id: u32, default_size: u32, count: u32, data: &[u8]) -> Vec<u8> {
+    let build = |data_offset: u32| {
+        let mut tfhd = track_id.to_be_bytes().to_vec();
+        tfhd.extend(default_size.to_be_bytes());
+        let mut trun = count.to_be_bytes().to_vec();
+        trun.extend(data_offset.to_be_bytes());
+        let traf = [
+            full_box(b"tfhd", 0, 0x2_0010, &tfhd),
+            full_box(b"trun", 0, 0x1, &trun),
+        ]
+        .concat();
+        mp4_box(
+            b"moof",
+            &[
+                full_box(b"mfhd", 0, 0, &1u32.to_be_bytes()),
+                mp4_box(b"traf", &traf),
+            ]
+            .concat(),
+        )
+    };
+    let moof_len = build(0).len() as u32;
+    [build(moof_len + 8), mp4_box(b"mdat", data)].concat()
+}
+
+/// A run without sample sizes can claim millions of samples in a few bytes,
+/// which must not cost time when they hold no audio of the track.
+#[test]
+fn runs_without_sample_sizes() {
+    let (_, frames) = adts_frames(MONO);
+    let frame = &frames[10];
+    let header = fragmented_mp4(&mono_track(1), &[], false);
+    let mut file = header.clone();
+    for _ in 0..500 {
+        file.extend(default_size_fragment(1, 0, 4_000_000, &[]));
+        file.extend(default_size_fragment(2, 1000, 4_000_000, &[]));
+    }
+    for _ in 0..2 {
+        file.extend(default_size_fragment(
+            1,
+            frame.len() as u32,
+            5,
+            &frame.repeat(5),
+        ));
+    }
+    let expected = fragmented_mp4(&mono_track(1), &vec![vec![frame.clone(); 5]; 2], false);
+    assert_same(&mp4(file).unwrap(), &mp4(expected).unwrap());
+}
+
+/// Other tracks' chunks sit between the AAC track's in the media data.
+#[test]
+fn skips_other_tracks_and_boxes() {
+    let video = Mp4Track {
+        id: 2,
+        handler: *b"vide",
+        sample_entry: mp4_box(b"avc1", &[0; 78]),
+        timescale: 90_000,
+        edit: None,
+        chunks: vec![vec![vec![0xEE; 50_000]]; 8],
+        wide_offsets: false,
+        quicktime: false,
+    };
+    let mut audio = mono_track(6);
+    audio.id = 1;
+    audio.wide_offsets = true;
+    let between = mp4_box(b"free", &[0; 300]);
+    let file = faststart_mp4(&[video, audio], 1000, &[], &between);
+    assert_same(&mp4(file).unwrap(), &adts(MONO));
+}
+
+/// QuickTime files have a second `hdlr` box, for the data handler, in `minf`.
+#[test]
+fn reads_quicktime_files() {
+    let mut track = mono_track(10);
+    track.quicktime = true;
+    let file = faststart_mp4(&[track], 1000, &[], &[]);
+    assert_same(&mp4(file).unwrap(), &adts(MONO));
+}
+
+#[test]
+fn media_data_before_moov_is_unsupported() {
+    let file = faststart_mp4(&[mono_track(10)], 1000, &[], &[]);
+    // Move the mdat box (the end of the file) in front of moov.
+    let mdat_start = file.windows(4).rposition(|w| w == b"mdat").unwrap() - 4;
+    let ftyp_len = 8 + 20;
+    let reordered = [
+        &file[..ftyp_len],
+        &file[mdat_start..],
+        &file[ftyp_len..mdat_start],
+    ]
+    .concat();
+    let result = mp4(reordered);
+    assert!(
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("moov")),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn cut_between_boxes_decodes_what_is_there() {
+    let (_, frames) = adts_frames(MONO);
+    let fragments: Vec<Vec<Vec<u8>>> = frames.chunks(10).map(<[_]>::to_vec).collect();
+    let file = fragmented_mp4(&mono_track(1), &fragments, false);
+    let cut = file.windows(4).rposition(|w| w == b"moof").unwrap() - 4;
+    let decoded = mp4(file[..cut].to_vec()).unwrap();
+    let kept = (fragments.len() - 1) * 10 * 1024;
+    assert_same(&decoded, &adts(MONO)[..kept]);
+}
+
+#[test]
+fn cut_inside_a_box_is_rejected() {
+    let file = faststart_mp4(&[mono_track(10)], 1000, &[], &[]);
+    for cut in [file.len() - 100, 200] {
+        let result = mp4(file[..cut].to_vec());
+        assert!(
+            matches!(result, Err(Error::InvalidInput(_))),
+            "{cut}: {result:?}"
+        );
+    }
+    let result =
+        samples(AdtsAacSource::new(Cursor::new(MONO[..MONO.len() - 10].to_vec())).unwrap());
     assert!(matches!(result, Err(Error::InvalidInput(_))), "{result:?}");
+}
+
+#[test]
+fn oversized_tables_are_rejected() {
+    let mut options = Mp4Options::default();
+    options.max_table_bytes = 100;
+    let file = faststart_mp4(&[mono_track(1)], 1000, &[], &[]);
+    let result = mp4_with(file, options);
+    assert!(matches!(result, Err(Error::LimitExceeded(_))), "{result:?}");
+
+    // A trun box can claim billions of samples without listing them.
+    let (_, frames) = adts_frames(MONO);
+    let mut file = fragmented_mp4(&mono_track(1), &[frames[..2].to_vec()], false);
+    let trun = file.windows(4).position(|w| w == b"trun").unwrap();
+    file[trun + 5..trun + 8].copy_from_slice(&[0, 0, 0x01]);
+    file[trun + 8..trun + 12].copy_from_slice(&u32::MAX.to_be_bytes());
+    let result = mp4(file);
+    assert!(matches!(result, Err(Error::LimitExceeded(_))), "{result:?}");
+}
+
+/// `depth` boxes of `kind`, each the only child of the one before.
+fn nested_boxes(kind: &[u8; 4], depth: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(depth * 8);
+    for level in 0..depth {
+        bytes.extend((((depth - level) * 8) as u32).to_be_bytes());
+        bytes.extend(kind);
+    }
+    bytes
+}
+
+/// Recursing into every nested container would overflow the stack, which
+/// aborts the process rather than returning an error.
+#[test]
+fn deep_nesting_is_not_followed() {
+    let depth = 200_000;
+    let trak = mp4_box(b"trak", &nested_boxes(b"mdia", depth));
+    let result = mp4(mp4_box(b"moov", &trak));
+    assert!(matches!(result, Err(Error::InvalidInput(_))), "{result:?}");
+
+    let udta = mp4_box(b"udta", &nested_boxes(b"meta", depth));
+    let file = faststart_mp4(&[mono_track(10)], 1000, &udta, &[]);
+    assert_same(&mp4(file).unwrap(), &adts(MONO));
+}
+
+/// Each `trex` box adds a track's defaults, so their number must be bounded
+/// for memory not to grow with the input.
+#[test]
+fn track_defaults_are_bounded() {
+    let trex: Vec<u8> = (0..10_000u32)
+        .flat_map(|id| full_box(b"trex", 0, 0, &[&id.to_be_bytes()[..], &[0; 16]].concat()))
+        .collect();
+    let file = faststart_mp4(&[mono_track(10)], 1000, &mp4_box(b"mvex", &trex), &[]);
+    let result = mp4(file);
+    assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+}
+
+#[test]
+fn extreme_values_do_not_overflow() {
+    // An iTunSMPB length of u64::MAX leaves nothing to trim at the end.
+    let udta = itunsmpb_udta(PRIMING as u32, 0, u64::MAX, true);
+    let file = faststart_mp4(&[mono_track(10)], 1000, &udta, &[]);
+    assert_same(&mp4(file).unwrap(), &adts(MONO)[PRIMING as usize..]);
+
+    // A chunk offset near u64::MAX puts the next sample past it.
+    let mut track = mono_track(10);
+    track.wide_offsets = true;
+    let mut file = faststart_mp4(&[track], 1000, &[], &[]);
+    let co64 = file.windows(4).position(|w| w == b"co64").unwrap();
+    file[co64 + 12..co64 + 20].copy_from_slice(&(u64::MAX - 10).to_be_bytes());
+    let result = mp4(file);
+    assert!(matches!(result, Err(Error::InvalidInput(_))), "{result:?}");
+}
+
+#[test]
+fn rejects_other_inputs_and_codecs() {
+    let ogg = opus_like_garbage();
+    assert!(matches!(mp4(ogg.clone()), Err(Error::InvalidInput(_))));
+    assert!(matches!(
+        AdtsAacSource::new(Cursor::new(ogg)),
+        Err(Error::InvalidInput(_))
+    ));
+
+    let mut opus = mono_track(10);
+    opus.sample_entry = audio_sample_entry(b"Opus", 1, 48_000, &[]);
+    let result = mp4(faststart_mp4(&[opus], 1000, &[], &[]));
+    assert!(
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("Opus")),
+        "{result:?}"
+    );
+
+    // 960-sample frames, which Symphonia does not decode.
+    let (config, frames) = adts_frames(MONO);
+    let mut long_frames = config;
+    long_frames[1] |= 0b100;
+    let track = Mp4Track::audio(&long_frames, 1, 44_100, &frames, 10);
+    let result = mp4(faststart_mp4(&[track], 1000, &[], &[]));
+    assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+
+    let meta = mp4_box(b"meta", &[]);
+    let result = mp4(faststart_mp4(&[mono_track(10)], 1000, &meta, &[]));
+    assert!(matches!(result, Err(Error::InvalidInput(_))), "{result:?}");
+
+    let mut encrypted = mono_track(10);
+    encrypted.sample_entry[4..8].copy_from_slice(b"enca");
+    let result = mp4(faststart_mp4(&[encrypted], 1000, &[], &[]));
+    assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
 }
 
 fn opus_like_garbage() -> Vec<u8> {
     let mut bytes = b"OggS\0\x02".to_vec();
     bytes.extend([0; 60]);
     bytes
+}
+
+/// Symphonia decodes AAC-LC only, so HE-AAC yields its core: half the rate,
+/// without the SBR layer. Signalling HE-AAC in the config, which Symphonia
+/// would reject, gives the same result.
+#[test]
+fn he_aac_decodes_its_core() {
+    let source = Mp4AacSource::new(Cursor::new(HE_AAC.to_vec())).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (22_050, 1));
+    let core = samples(source).unwrap();
+    // iTunSMPB: 1.013 s at the core rate.
+    assert_eq!(core.len(), 22_337);
+
+    let (config, frames) = mp4_samples(HE_AAC);
+    let untrimmed = mp4(faststart_mp4(
+        &[Mp4Track::audio(&config, 1, 22_050, &frames, 10)],
+        1000,
+        &[],
+        &[],
+    ))
+    .unwrap();
+    // Object type 5 at 44.1 kHz around an AAC-LC core at 22.05 kHz, mono.
+    let explicit = [0b0010_1011, 0b1000_1010, 0b0000_1000];
+    let signalled = mp4(faststart_mp4(
+        &[Mp4Track::audio(&explicit, 1, 44_100, &frames, 10)],
+        1000,
+        &[],
+        &[],
+    ))
+    .unwrap();
+    assert_same(&signalled, &untrimmed);
 }

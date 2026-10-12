@@ -29,6 +29,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mp4_aac"
+path = "fuzz_targets/mp4_aac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "adts_aac"
 path = "fuzz_targets/adts_aac.rs"
 test = false
