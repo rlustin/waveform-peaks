@@ -1,7 +1,7 @@
 # waveform-peaks
 
 Constant-memory generation of BBC audiowaveform-compatible peak data (`.dat`
-and JSON) from streamed audio. Draft.
+and JSON) from streamed audio.
 
 ## Design
 
