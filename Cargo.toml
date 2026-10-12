@@ -8,7 +8,7 @@ repository = "https://github.com/rlustin/waveform-peaks"
 description = "Constant-memory generation of audiowaveform-compatible peak data from streamed audio"
 keywords = ["audio", "waveform", "peaks", "opus", "audiowaveform"]
 categories = ["multimedia::audio", "visualization"]
-include = ["/src", "/tests", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/tests", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE-*", "!.DS_Store"]
 
 [lints.rust]
 unsafe_code = "forbid"
