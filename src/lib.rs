@@ -5,9 +5,9 @@
 //! [`PeakSink`]. No stage holds more than one block, so memory does not grow
 //! with the input: an hour-long upload uses the same memory as a second.
 //!
-//! Sources are [`RawPcmSource`] for raw PCM and, with the default `opus`
-//! feature, [`OggOpusSource`] and [`WebmOpusSource`] for Opus in Ogg, WebM and
-//! Matroska.
+//! Sources are [`RawPcmSource`] for raw PCM; with the default `opus` feature,
+//! [`OggOpusSource`] and [`WebmOpusSource`] for Opus in Ogg, WebM and Matroska;
+//! and with the optional `aac` feature, `AdtsAacSource` for AAC in ADTS.
 //!
 //! For the same options the output matches BBC audiowaveform byte for byte on
 //! PCM input. On Opus input with `Overflow::Wrap` it is within ±1 per value,
@@ -69,6 +69,8 @@ pub use builder::{Header, Peak, PeakBuilder};
 pub use error::Error;
 pub use options::{Bits, ChannelMode, Limits, Options};
 pub use sink::{DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
+#[cfg(feature = "aac")]
+pub use source::AdtsAacSource;
 #[cfg(feature = "opus")]
 pub use source::{DecodeRate, OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
 pub use source::{PcmSource, RawPcmSource};

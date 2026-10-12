@@ -404,3 +404,25 @@ fn ebml_lace_size(value: u64) -> Vec<u8> {
 pub fn ns_for_48k_frames(frames: u64) -> u64 {
     frames * 1_000_000_000 / 48_000
 }
+
+/// Splits an ADTS file into its raw AAC frames, and returns the matching
+/// two-byte `AudioSpecificConfig`.
+pub fn adts_frames(adts: &[u8]) -> ([u8; 2], Vec<Vec<u8>>) {
+    let mut frames = Vec::new();
+    let mut config = [0; 2];
+    let mut at = 0;
+    while at < adts.len() {
+        let header = &adts[at..];
+        let header_len = if header[1] & 1 == 1 { 7 } else { 9 };
+        let len = ((header[3] as usize & 3) << 11)
+            | (header[4] as usize) << 3
+            | (header[5] as usize) >> 5;
+        let profile = (header[2] >> 6) as u16;
+        let frequency = ((header[2] >> 2) & 0xF) as u16;
+        let channels = ((header[2] & 1) << 2 | header[3] >> 6) as u16;
+        config = ((profile + 1) << 11 | frequency << 7 | channels << 3).to_be_bytes();
+        frames.push(header[header_len..len].to_vec());
+        at += len;
+    }
+    (config, frames)
+}

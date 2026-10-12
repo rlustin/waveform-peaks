@@ -1,4 +1,5 @@
-//! Generates a `.dat` or `.json` waveform from an Ogg Opus or WebM Opus file.
+//! Generates a `.dat` or `.json` waveform from an Ogg Opus or WebM Opus file,
+//! or with the `aac` feature an ADTS AAC file.
 //!
 //! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split]
 
@@ -48,13 +49,24 @@ fn main() -> ExitCode {
 fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     let mut input = BufReader::new(File::open(path)?);
     let magic = input.fill_buf()?;
-    if magic.starts_with(b"OggS") {
-        Ok(Box::new(OggOpusSource::new(input)?))
-    } else if magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        Ok(Box::new(WebmOpusSource::new(input)?))
-    } else {
-        Err(Error::Unsupported("neither Ogg nor WebM".into()))
+    let ogg = magic.starts_with(b"OggS");
+    let webm = magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]);
+    let adts =
+        magic.starts_with(b"ID3") || matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0);
+    if ogg {
+        return Ok(Box::new(OggOpusSource::new(input)?));
     }
+    if webm {
+        return Ok(Box::new(WebmOpusSource::new(input)?));
+    }
+    #[cfg(feature = "aac")]
+    if adts {
+        return Ok(Box::new(waveform_peaks::AdtsAacSource::new(input)?));
+    }
+    if adts {
+        return Err(Error::Unsupported("AAC needs the aac feature".into()));
+    }
+    Err(Error::Unsupported("not Ogg, WebM or ADTS".into()))
 }
 
 fn run(input: &str, output: &str, options: &Options) -> Result<(), Error> {

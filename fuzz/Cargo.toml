@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.waveform-peaks]
 path = ".."
+features = ["aac"]
 
 [[bin]]
 name = "ogg_opus"
@@ -23,6 +24,13 @@ bench = false
 [[bin]]
 name = "webm_opus"
 path = "fuzz_targets/webm_opus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adts_aac"
+path = "fuzz_targets/adts_aac.rs"
 test = false
 doc = false
 bench = false

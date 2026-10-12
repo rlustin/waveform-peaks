@@ -22,6 +22,14 @@ use waveform_peaks::{
     generate,
 };
 
+#[cfg(any(feature = "opus", feature = "aac"))]
+fn ffmpeg(args: &[&str]) {
+    run(
+        &tool("FFMPEG", "ffmpeg"),
+        [&["-v", "error", "-y"], args].concat(),
+    );
+}
+
 fn audiowaveform(args: &[&str]) {
     run(
         &tool("AUDIOWAVEFORM", "audiowaveform"),
@@ -146,13 +154,6 @@ fn raw_pcm_json_matches_audiowaveform() {
 mod opus_input {
     use super::*;
     use waveform_peaks::{OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
-
-    fn ffmpeg(args: &[&str]) {
-        run(
-            &tool("FFMPEG", "ffmpeg"),
-            [&["-v", "error", "-y"], args].concat(),
-        );
-    }
 
     /// Largest accepted per-value difference for Opus input.
     ///
@@ -363,6 +364,152 @@ mod opus_input {
             } else {
                 assert_eq!(wrapped, saturated, "{}", fixture.name);
             }
+        }
+    }
+}
+
+/// audiowaveform reads no AAC, so the reference is FFmpeg's AAC decoder. Its
+/// float output is converted here as this crate converts Symphonia's, so the
+/// comparison covers decoding and trimming, not FFmpeg's 16-bit conversion.
+#[cfg(feature = "aac")]
+mod aac_input {
+    use super::*;
+    use waveform_peaks::{AdtsAacSource, RawPcmSource};
+
+    /// Largest accepted per-sample difference. Both decoders work in floating
+    /// point and round a few samples in ten thousand differently.
+    const AAC_TOLERANCE: i32 = 1;
+
+    struct Fixture {
+        name: &'static str,
+        source: &'static str,
+        channels: u16,
+        rate: u32,
+    }
+
+    const FIXTURES: &[Fixture] = &[
+        Fixture {
+            name: "mono-44k1",
+            source: "sine=frequency=440:sample_rate=44100:duration=1.013",
+            channels: 1,
+            rate: 44_100,
+        },
+        Fixture {
+            name: "stereo-48k-odd-length",
+            source: "aevalsrc=exprs=0.5*sin(440*2*PI*t)|0.3*sin(660*2*PI*t)+0.1*sin(5000*2*PI*t):s=48000:d=1.2345",
+            channels: 2,
+            rate: 48_000,
+        },
+        Fixture {
+            name: "noise-16k",
+            source: "anoisesrc=d=2.1:c=pink:r=16000:a=0.5:seed=42",
+            channels: 1,
+            rate: 16_000,
+        },
+        Fixture {
+            name: "clipping-square",
+            source: "aevalsrc=exprs=sgn(sin(440*2*PI*t)):s=48000:d=1",
+            channels: 1,
+            rate: 48_000,
+        },
+    ];
+
+    fn encode(dir: &Path, fixture: &Fixture) -> std::path::PathBuf {
+        let path = dir.join(format!("{}.aac", fixture.name));
+        let channels = fixture.channels.to_string();
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            fixture.source,
+            "-ac",
+            channels.as_str(),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-f",
+            "adts",
+            path.to_str().unwrap(),
+        ]);
+        path
+    }
+
+    fn decode_ours(path: &Path) -> (Vec<i16>, u32, u16) {
+        let mut source = AdtsAacSource::new(fs::File::open(path).unwrap()).unwrap();
+        let mut samples = Vec::new();
+        while let Some(block) = source.next_block().unwrap() {
+            samples.extend(block);
+        }
+        (samples, source.sample_rate(), source.channels())
+    }
+
+    fn decode_ffmpeg(dir: &Path, path: &Path) -> Vec<i16> {
+        let raw = dir.join("reference.f32");
+        ffmpeg(&[
+            "-i",
+            path.to_str().unwrap(),
+            "-f",
+            "f32le",
+            raw.to_str().unwrap(),
+        ]);
+        fs::read(&raw)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&bytes| (f32::from_le_bytes(bytes) * 32768.0).round_ties_even() as i16)
+            .collect()
+    }
+
+    fn peaks(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let mut source = RawPcmSource::new(Cursor::new(bytes), rate, channels).unwrap();
+        let options = options(64, Bits::Sixteen, ChannelMode::Split);
+        ours(
+            &mut source,
+            &options,
+            DatWriter::new(Cursor::new(Vec::new())),
+        )
+        .into_inner()
+    }
+
+    #[test]
+    #[ignore = "needs ffmpeg on PATH"]
+    fn aac_matches_ffmpeg() {
+        let dir = TempDir::new().unwrap();
+        for fixture in FIXTURES {
+            let path = encode(dir.path(), fixture);
+            let context = fixture.name;
+            let (ours, rate, channels) = decode_ours(&path);
+            assert_eq!(
+                (rate, channels),
+                (fixture.rate, fixture.channels),
+                "{context}"
+            );
+            let theirs = decode_ffmpeg(dir.path(), &path);
+            // ADTS records no priming or padding: both decode every frame.
+            assert_eq!(ours.len(), theirs.len(), "{context}");
+            let theirs = &theirs[..ours.len()];
+            let worst = ours
+                .iter()
+                .zip(theirs)
+                .map(|(&a, &b)| (a as i32 - b as i32).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= AAC_TOLERANCE,
+                "{context}: samples differ by {worst}"
+            );
+            assert_dat_matches(
+                &peaks(&ours, rate, channels),
+                &peaks(theirs, rate, channels),
+                AAC_TOLERANCE,
+                context,
+            );
         }
     }
 }

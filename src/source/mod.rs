@@ -1,5 +1,9 @@
 //! Decoded audio inputs.
 
+#[cfg(feature = "aac")]
+mod aac;
+#[cfg(feature = "aac")]
+mod adts_aac;
 #[cfg(feature = "opus")]
 mod ogg_opus;
 #[cfg(feature = "opus")]
@@ -12,6 +16,8 @@ use std::fmt;
 use std::io::{self, BufReader};
 use std::io::{ErrorKind, Read};
 
+#[cfg(feature = "aac")]
+pub use adts_aac::AdtsAacSource;
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]

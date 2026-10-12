@@ -25,6 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo test --no-default-features
+      - run: cargo test --all-features
 
   msrv:
     name: Minimum Rust version
@@ -34,7 +35,7 @@ jobs:
       # Keep in sync with rust-version in Cargo.toml.
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --all-features
 
   lint:
     name: Lint
@@ -49,6 +50,7 @@ jobs:
       - run: cargo fmt --check --manifest-path fuzz/Cargo.toml
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - run: cargo clippy --all-features --all-targets -- -D warnings
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -87,3 +89,4 @@ jobs:
       # which the address sanitizer does not support.
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu ogg_opus -- -max_total_time=60 -max_len=32768 -timeout=10 -rss_limit_mb=512
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu webm_opus -- -max_total_time=60 -max_len=32768 -timeout=10 -rss_limit_mb=512
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu adts_aac -- -max_total_time=60 -max_len=32768 -timeout=10 -rss_limit_mb=512
