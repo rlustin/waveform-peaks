@@ -62,7 +62,7 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     }
     #[cfg(feature = "aac")]
     if mp4 {
-        return Ok(Box::new(waveform_peaks::Mp4AacSource::new(input)?));
+        return Ok(Box::new(waveform_peaks::Mp4Source::new(input)?));
     }
     #[cfg(feature = "aac")]
     if adts {

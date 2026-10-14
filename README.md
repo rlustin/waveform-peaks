@@ -9,7 +9,7 @@ and JSON) from streamed audio.
 PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSink
 (OggOpusSource,             (min/max per             (DatWriter, JsonWriter,
  WebmOpusSource,             output channel)          MemorySink)
- Mp4AacSource,
+ Mp4Source,
  AdtsAacSource,
  RawPcmSource)
 ```
@@ -18,7 +18,7 @@ PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSin
   buffer. `OggOpusSource` and `WebmOpusSource` read with plain `Read`, so an
   upload body can be decoded as it arrives, and so do the AAC readers.
   `WebmOpusSource` also reads Matroska, and browser `MediaRecorder` recordings,
-  whose clusters have no size. `Mp4AacSource` reads fragmented MP4, as Safari
+  whose clusters have no size. `Mp4Source` reads fragmented MP4, as Safari
   records, and MP4 with the `moov` box first.
 - **`PeakBuilder`** keeps one `(min, max)` accumulator per output channel.
 - **`PeakSink`** receives each point as it completes. `DatWriter` patches the
@@ -106,7 +106,7 @@ cargo clippy --no-default-features --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4_aac, adts_aac
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac
 ```
 
 GitHub Actions runs all of these except the oracle tests on every push and pull

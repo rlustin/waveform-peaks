@@ -375,7 +375,7 @@ mod opus_input {
 mod aac_input {
     use super::*;
     use std::process::Command;
-    use waveform_peaks::{AdtsAacSource, Mp4AacSource, RawPcmSource};
+    use waveform_peaks::{AdtsAacSource, Mp4Source, RawPcmSource};
 
     /// Largest accepted per-sample difference. Both decoders work in floating
     /// point and round a few samples in ten thousand differently.
@@ -477,7 +477,7 @@ mod aac_input {
         let mut source: Box<dyn PcmSource> = if layout == Layout::Adts {
             Box::new(AdtsAacSource::new(file).unwrap())
         } else {
-            Box::new(Mp4AacSource::new(file).unwrap())
+            Box::new(Mp4Source::new(file).unwrap())
         };
         let mut samples = Vec::new();
         while let Some(block) = source.next_block().unwrap() {

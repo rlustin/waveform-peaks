@@ -8,7 +8,7 @@ mod common;
 use std::io::{self, Cursor, Read};
 
 use common::*;
-use waveform_peaks::{AdtsAacSource, Error, Mp4AacSource, Mp4Options, PcmSource};
+use waveform_peaks::{AdtsAacSource, Error, Mp4Options, Mp4Source, PcmSource};
 
 const MONO: &[u8] = include_bytes!("data/sine-mono-44100.aac");
 const STEREO: &[u8] = include_bytes!("data/chord-stereo-48000.aac");
@@ -35,7 +35,7 @@ fn mp4(bytes: Vec<u8>) -> Result<Vec<i16>, Error> {
 }
 
 fn mp4_with(bytes: Vec<u8>, options: Mp4Options) -> Result<Vec<i16>, Error> {
-    samples(Mp4AacSource::with_options(Cursor::new(bytes), options)?)
+    samples(Mp4Source::with_options(Cursor::new(bytes), options)?)
 }
 
 fn adts(bytes: &[u8]) -> Vec<i16> {
@@ -153,7 +153,7 @@ fn edit_list_takes_precedence_over_itunsmpb() {
 
 #[test]
 fn reads_chrome_recordings() {
-    let source = Mp4AacSource::new(Cursor::new(CHROME)).unwrap();
+    let source = Mp4Source::new(Cursor::new(CHROME)).unwrap();
     assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
     // 43 frames of 1,024, with nothing to trim them by, as FFmpeg also decodes
     // it.
@@ -433,7 +433,7 @@ fn opus_like_garbage() -> Vec<u8> {
 /// would reject, gives the same result.
 #[test]
 fn he_aac_decodes_its_core() {
-    let source = Mp4AacSource::new(Cursor::new(HE_AAC.to_vec())).unwrap();
+    let source = Mp4Source::new(Cursor::new(HE_AAC.to_vec())).unwrap();
     assert_eq!((source.sample_rate(), source.channels()), (22_050, 1));
     let core = samples(source).unwrap();
     // iTunSMPB: 1.013 s at the core rate.

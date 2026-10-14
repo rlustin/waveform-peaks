@@ -5,7 +5,7 @@ mod aac;
 #[cfg(feature = "aac")]
 mod adts_aac;
 #[cfg(feature = "aac")]
-mod mp4_aac;
+mod mp4;
 #[cfg(feature = "opus")]
 mod ogg_opus;
 #[cfg(feature = "opus")]
@@ -21,7 +21,10 @@ use std::io::{ErrorKind, Read};
 #[cfg(feature = "aac")]
 pub use adts_aac::AdtsAacSource;
 #[cfg(feature = "aac")]
-pub use mp4_aac::{Mp4AacSource, Mp4Options};
+#[allow(deprecated)]
+pub use mp4::Mp4AacSource;
+#[cfg(feature = "aac")]
+pub use mp4::{Mp4Options, Mp4Source};
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]

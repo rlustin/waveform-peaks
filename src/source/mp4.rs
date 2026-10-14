@@ -16,7 +16,7 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024;
 /// handful.
 const MAX_TRACK_DEFAULTS: usize = 1024;
 
-/// Settings for [`Mp4AacSource`].
+/// Settings for [`Mp4Source`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Mp4Options {
@@ -61,7 +61,7 @@ impl Default for Mp4Options {
 ///
 /// A file cut between boxes is not an error: the samples present are decoded.
 /// A cut inside a box is [`Error::InvalidInput`].
-pub struct Mp4AacSource<R: Read> {
+pub struct Mp4Source<R: Read> {
     reader: BoxReader<R>,
     decoder: AacDecoder,
     track_id: u32,
@@ -78,7 +78,11 @@ pub struct Mp4AacSource<R: Read> {
     finished: bool,
 }
 
-impl<R: Read> Mp4AacSource<R> {
+/// The former name of [`Mp4Source`].
+#[deprecated(since = "0.1.2", note = "renamed to `Mp4Source`")]
+pub type Mp4AacSource<R> = Mp4Source<R>;
+
+impl<R: Read> Mp4Source<R> {
     /// Reads up to the end of the `moov` box, with default options.
     ///
     /// # Errors
@@ -144,7 +148,7 @@ impl<R: Read> Mp4AacSource<R> {
         };
         decoder.trim(start, end);
 
-        Ok(Mp4AacSource {
+        Ok(Mp4Source {
             reader,
             decoder,
             track_id: track.id,
@@ -249,9 +253,9 @@ impl<R: Read> Mp4AacSource<R> {
     }
 }
 
-impl<R: Read> fmt::Debug for Mp4AacSource<R> {
+impl<R: Read> fmt::Debug for Mp4Source<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Mp4AacSource")
+        f.debug_struct("Mp4Source")
             .field("decoder", &self.decoder)
             .field("track_id", &self.track_id)
             .field("finished", &self.finished)
@@ -259,7 +263,7 @@ impl<R: Read> fmt::Debug for Mp4AacSource<R> {
     }
 }
 
-impl<R: Read> PcmSource for Mp4AacSource<R> {
+impl<R: Read> PcmSource for Mp4Source<R> {
     fn sample_rate(&self) -> u32 {
         self.decoder.sample_rate()
     }
