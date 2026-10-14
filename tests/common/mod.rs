@@ -2,7 +2,24 @@
 
 use std::{ffi::OsStr, path::PathBuf, process::Command};
 
-use waveform_peaks::{Bits, ChannelMode, Options};
+use waveform_peaks::{Bits, ChannelMode, Error, Options, PcmSource};
+
+/// Drains `source`.
+pub fn samples<P: PcmSource>(mut source: P) -> Result<Vec<i16>, Error> {
+    let mut samples = Vec::new();
+    while let Some(block) = source.next_block()? {
+        samples.extend(block);
+    }
+    Ok(samples)
+}
+
+/// Like `assert_eq!`, without printing thousands of samples.
+#[track_caller]
+pub fn assert_same(actual: &[i16], expected: &[i16]) {
+    assert_eq!(actual.len(), expected.len(), "sample count");
+    let first_difference = actual.iter().zip(expected).position(|(a, e)| a != e);
+    assert_eq!(first_difference, None, "first differing sample");
+}
 
 /// Deterministic PCM: xorshift noise at varying levels, with full-scale and
 /// zero runs mixed in so truncation and extremes get exercised.
@@ -473,6 +490,16 @@ pub fn mp4a(config: &[u8], channels: u16, rate: u32) -> Vec<u8> {
     audio_sample_entry(b"mp4a", channels, rate, &esds(0x40, config))
 }
 
+/// A `dOps` box: the fields of `OpusHead` without its magic, big-endian.
+pub fn dops(channels: u8, pre_skip: u16, input_rate: u32, gain: i16) -> Vec<u8> {
+    let mut body = vec![0, channels];
+    body.extend(pre_skip.to_be_bytes());
+    body.extend(input_rate.to_be_bytes());
+    body.extend(gain.to_be_bytes());
+    body.push(0);
+    mp4_box(b"dOps", &body)
+}
+
 /// A track of an MP4 file built by [`faststart_mp4`] or [`fragmented_mp4`].
 pub struct Mp4Track {
     pub id: u32,
@@ -506,6 +533,19 @@ impl Mp4Track {
             chunks: samples.chunks(per_chunk).map(<[_]>::to_vec).collect(),
             wide_offsets: false,
             quicktime: false,
+        }
+    }
+
+    /// An Opus track at the 48 kHz media timescale, with the given `dOps` box.
+    pub fn opus(dops: &[u8], samples: &[Vec<u8>], per_chunk: usize) -> Self {
+        Mp4Track {
+            sample_entry: audio_sample_entry(
+                b"Opus",
+                dops.get(9).map_or(1, |&c| c as u16),
+                48_000,
+                dops,
+            ),
+            ..Mp4Track::audio(&[], 2, 48_000, samples, per_chunk)
         }
     }
 

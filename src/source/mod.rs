@@ -4,7 +4,7 @@
 mod aac;
 #[cfg(feature = "aac")]
 mod adts_aac;
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 mod mp4;
 #[cfg(feature = "opus")]
 mod ogg_opus;
@@ -23,7 +23,7 @@ pub use adts_aac::AdtsAacSource;
 #[cfg(feature = "aac")]
 #[allow(deprecated)]
 pub use mp4::Mp4AacSource;
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "opus", feature = "aac"))]
 pub use mp4::{Mp4Options, Mp4Source};
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
@@ -202,7 +202,6 @@ impl<R: Read> CountingReader<R> {
         Ok(())
     }
 
-    #[cfg(feature = "aac")]
     pub(crate) fn skip_to_end(&mut self) -> Result<(), Error> {
         self.position += io::copy(&mut self.reader, &mut io::sink())?;
         Ok(())

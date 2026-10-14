@@ -6,13 +6,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Opus input from MP4, fragmented or with the `moov` box first, as Chrome
+  records. Decoder settings are in `Mp4Options::opus`.
+
 ### Changed
 
-- `Mp4AacSource` is renamed `Mp4Source`, ahead of reading other codecs than
-  AAC from MP4. The old name remains as a deprecated alias.
+- `Mp4AacSource` is renamed `Mp4Source`, now that it reads Opus as well as
+  AAC, and is available with either the `opus` or the `aac` feature. The old
+  name remains as a deprecated alias.
 - `Mp4Source` stops reading at the end of the edit list: a file cut or
   damaged after the audio it shows decodes, and the rest of the input is
   not read.
+- With both features, `Mp4Source` decodes the first AAC or Opus track: an
+  Opus track ahead of an AAC one, which 0.1.1 passed over, is now chosen.
+- An AAC track that Symphonia cannot decode, such as AAC Main, is passed
+  over for the next audio track instead of failing the file.
 
 ## [0.1.1] - 2026-10-14
 

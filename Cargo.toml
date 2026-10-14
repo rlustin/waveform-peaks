@@ -19,7 +19,7 @@ all-features = true
 
 [features]
 default = ["opus"]
-# Ogg Opus decoding through libopus.
+# Opus decoding in Ogg, WebM and MP4 through libopus.
 opus = ["dep:ogg", "dep:opus"]
 # AAC decoding in MP4 and ADTS through Symphonia (MPL-2.0).
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]

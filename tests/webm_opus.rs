@@ -12,14 +12,6 @@ use waveform_peaks::{Error, OggOpusSource, OpusOptions, PcmSource, WebmOpusSourc
 const PACKETS: u64 = 30;
 const END_TRIM: u64 = 100;
 
-fn samples<P: PcmSource>(mut source: P) -> Result<Vec<i16>, Error> {
-    let mut samples = Vec::new();
-    while let Some(block) = source.next_block()? {
-        samples.extend(block);
-    }
-    Ok(samples)
-}
-
 fn webm(bytes: Vec<u8>) -> Result<Vec<i16>, Error> {
     webm_with(bytes, OpusOptions::default())
 }
@@ -32,14 +24,6 @@ fn webm_with(bytes: Vec<u8>, options: OpusOptions) -> Result<Vec<i16>, Error> {
 fn ogg_reference() -> Vec<i16> {
     let bytes = opus_stream(1, PACKETS, END_TRIM).concat();
     samples(OggOpusSource::new(Cursor::new(bytes)).unwrap()).unwrap()
-}
-
-/// Like `assert_eq!`, without printing thousands of samples.
-#[track_caller]
-fn assert_same(actual: &[i16], expected: &[i16]) {
-    assert_eq!(actual.len(), expected.len(), "sample count");
-    let first_difference = actual.iter().zip(expected).position(|(a, e)| a != e);
-    assert_eq!(first_difference, None, "first differing sample");
 }
 
 fn simple_block(packet: &[u8]) -> Vec<u8> {

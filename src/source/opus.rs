@@ -1,4 +1,4 @@
-//! Opus decoding shared by the Ogg and WebM readers.
+//! Opus decoding shared by the Ogg, WebM and MP4 readers.
 
 use std::fmt;
 use std::ops::Range;
@@ -43,8 +43,10 @@ pub enum Overflow {
     Wrap,
 }
 
-/// Decoder settings, shared by [`OggOpusSource`](crate::OggOpusSource) and
-/// [`WebmOpusSource`](crate::WebmOpusSource).
+/// Decoder settings, shared by [`OggOpusSource`](crate::OggOpusSource),
+/// [`WebmOpusSource`](crate::WebmOpusSource), and
+/// [`Mp4Source`](crate::Mp4Source) through
+/// [`Mp4Options::opus`](crate::Mp4Options::opus).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OpusOptions {
@@ -87,8 +89,41 @@ impl OpusHead {
         if version >> 4 != 0 {
             return Err(Error::Unsupported(format!("OpusHead version {version}")));
         }
-        let channels = data[9];
-        let family = data[18];
+        Self::new(
+            data[9],
+            u16::from_le_bytes([data[10], data[11]]),
+            u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+            i16::from_le_bytes([data[16], data[17]]),
+            data[18],
+        )
+    }
+
+    /// Parses the body of an MP4 `dOps` box: the `OpusHead` fields without
+    /// the magic, big-endian.
+    pub(crate) fn from_dops(data: &[u8]) -> Result<Self, Error> {
+        if data.len() < 11 {
+            return Err(invalid("truncated dOps box"));
+        }
+        let version = data[0];
+        if version != 0 {
+            return Err(Error::Unsupported(format!("dOps version {version}")));
+        }
+        Self::new(
+            data[1],
+            u16::from_be_bytes([data[2], data[3]]),
+            u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            i16::from_be_bytes([data[8], data[9]]),
+            data[10],
+        )
+    }
+
+    fn new(
+        channels: u8,
+        pre_skip: u16,
+        input_sample_rate: u32,
+        output_gain: i16,
+        family: u8,
+    ) -> Result<Self, Error> {
         if family != 0 {
             return Err(Error::Unsupported(format!(
                 "channel mapping family {family}"
@@ -101,9 +136,9 @@ impl OpusHead {
         }
         Ok(OpusHead {
             channels,
-            pre_skip: u16::from_le_bytes([data[10], data[11]]),
-            input_sample_rate: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
-            output_gain: i16::from_le_bytes([data[16], data[17]]),
+            pre_skip,
+            input_sample_rate,
+            output_gain,
         })
     }
 }

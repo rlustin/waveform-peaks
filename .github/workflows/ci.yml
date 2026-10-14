@@ -25,6 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo test --no-default-features
+      - run: cargo test --no-default-features --features aac
       - run: cargo test --all-features
 
   msrv:
@@ -50,6 +51,7 @@ jobs:
       - run: cargo fmt --check --manifest-path fuzz/Cargo.toml
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - run: cargo clippy --no-default-features --features aac --all-targets -- -D warnings
       - run: cargo clippy --all-features --all-targets -- -D warnings
       - run: cargo doc --no-deps
         env:
