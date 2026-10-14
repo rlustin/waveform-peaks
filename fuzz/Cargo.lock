@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "waveform-peaks"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "ogg",
  "opus",
