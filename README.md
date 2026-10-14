@@ -118,9 +118,10 @@ Fuzzing needs a nightly toolchain and
 `fuzz/corpus/<target>` with small files, each prefixed with one byte that the
 target reads as options.
 
-For runs longer than CI's minute, skip `-fork`, whose temporary directories
-fill the disk, and raise `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
-under the sanitizer grows past 512 MB without a leak.
+CI and longer runs use `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
+under the sanitizer grows past 512 MB without a leak, while any single
+allocation over 64 MB still fails. For runs longer than CI's minute, also skip
+`-fork`, whose temporary directories fill the disk.
 
 ### Oracle tests
 
