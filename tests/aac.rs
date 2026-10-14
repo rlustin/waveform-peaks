@@ -12,6 +12,9 @@ use waveform_peaks::{AdtsAacSource, Error, Mp4AacSource, Mp4Options, PcmSource};
 
 const MONO: &[u8] = include_bytes!("data/sine-mono-44100.aac");
 const STEREO: &[u8] = include_bytes!("data/chord-stereo-48000.aac");
+/// Recorded by Chrome 155's `MediaRecorder`: fragmented and stereo, with the
+/// sample tables before the sample description and no edit list.
+const CHROME: &[u8] = include_bytes!("data/chrome-aac-stereo.mp4");
 /// HE-AAC from Apple's encoder, which signals SBR only inside the frames.
 const HE_AAC: &[u8] = include_bytes!("data/he-aac-apple.m4a");
 
@@ -146,6 +149,35 @@ fn edit_list_takes_precedence_over_itunsmpb() {
     let file = faststart_mp4(&[track], 1000, &udta, &[]);
     let expected = &adts(MONO)[PRIMING as usize..(PRIMING + MONO_LENGTH) as usize];
     assert_same(&mp4(file).unwrap(), expected);
+}
+
+#[test]
+fn reads_chrome_recordings() {
+    let source = Mp4AacSource::new(Cursor::new(CHROME)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    // 43 frames of 1,024, with nothing to trim them by, as FFmpeg also decodes
+    // it.
+    assert_eq!(samples(source).unwrap().len(), 44_032 * 2);
+}
+
+/// The codec is unknown while the tables are read, so the limit applies once
+/// the track turns out to be the one decoded.
+#[test]
+fn oversized_tables_before_the_sample_description() {
+    let mut options = Mp4Options::default();
+    options.max_table_bytes = 100;
+    let file = stsd_last(&faststart_mp4(&[mono_track(1)], 1000, &[], &[]));
+    let result = mp4_with(file, options);
+    assert!(matches!(result, Err(Error::LimitExceeded(_))), "{result:?}");
+
+    // Tables over the limit on a track that is passed over do not count.
+    let mut ac3 = mono_track(1);
+    ac3.id = 2;
+    ac3.sample_entry = audio_sample_entry(b"ac-3", 1, 48_000, &[]);
+    ac3.chunks = vec![vec![vec![0; 1]; 2000]];
+    let file = stsd_last(&faststart_mp4(&[ac3, mono_track(1000)], 1000, &[], &[]));
+    options.max_table_bytes = 1000;
+    assert_same(&mp4_with(file, options).unwrap(), &adts(MONO));
 }
 
 /// Recorders write fragments, each with its own moof and mdat box.

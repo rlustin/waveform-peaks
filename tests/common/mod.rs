@@ -715,6 +715,38 @@ pub fn fragmented_mp4(
     out
 }
 
+/// Moves the sample description of every track after its sample tables, as
+/// Chrome writes them. Box sizes are unchanged, so chunk offsets stay valid.
+pub fn stsd_last(file: &[u8]) -> Vec<u8> {
+    let be = |data: &[u8], at: usize| u32::from_be_bytes(data[at..at + 4].try_into().unwrap());
+    let mut out = file.to_vec();
+    let moov_end = file
+        .windows(4)
+        .position(|w| w == b"mdat")
+        .unwrap_or(file.len());
+    let mut from = 0;
+    while let Some(found) = file[from..moov_end].windows(4).position(|w| w == b"stbl") {
+        let start = from + found + 4;
+        let end = start - 8 + be(file, start - 8) as usize;
+        let (mut stsd, mut rest) = (Vec::<u8>::new(), Vec::<u8>::new());
+        let mut at = start;
+        while at < end {
+            let size = be(file, at) as usize;
+            let child = &file[at..at + size];
+            if &child[4..8] == b"stsd" {
+                stsd.extend_from_slice(child);
+            } else {
+                rest.extend_from_slice(child);
+            }
+            at += size;
+        }
+        rest.extend(stsd);
+        out[start..end].copy_from_slice(&rest);
+        from = end;
+    }
+    out
+}
+
 /// The samples of the first track of a non-fragmented MP4 file, and its
 /// `AudioSpecificConfig`.
 pub fn mp4_samples(file: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {

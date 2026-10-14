@@ -415,6 +415,11 @@ fn read_track<R: Read>(
         .filter(|&timescale| timescale != 0)
         .ok_or_else(|| invalid("missing media timescale"))?;
     let id = state.id.ok_or_else(|| invalid("missing track header"))?;
+    if state.oversized_tables {
+        return Err(Error::LimitExceeded(
+            "MP4 sample tables larger than max_table_bytes",
+        ));
+    }
     let table = state.tables.into_table()?;
     Ok(TrackKind::Aac(Track {
         id,
@@ -433,6 +438,8 @@ struct TrackState {
     codec: Option<Codec>,
     edit: Option<Edit>,
     tables: RawTables,
+    /// Set when a table did not fit in `max_table_bytes` and was skipped.
+    oversized_tables: bool,
 }
 
 enum Codec {
@@ -480,17 +487,20 @@ fn read_track_boxes<R: Read>(
                 let body = reader.read_body(&child, MAX_HEADER_BYTES)?;
                 state.codec = Some(sample_description(&body)?);
             }
+            // Chrome writes the tables before the sample description, so
+            // they are kept while the codec is unknown.
             b"stsz" | b"stz2" | b"stco" | b"co64" | b"stsc"
-                if matches!(state.codec, Some(Codec::Aac(_))) =>
+                if state.sound
+                    && !matches!(state.codec, Some(Codec::Encrypted | Codec::Other(_))) =>
             {
                 let budget = max_table_bytes.saturating_sub(state.tables.bytes());
                 if child.size().is_none_or(|size| size > budget as u64) {
-                    return Err(Error::LimitExceeded(
-                        "MP4 sample tables larger than max_table_bytes",
-                    ));
+                    state.oversized_tables = true;
+                    reader.skip_box(&child)?;
+                } else {
+                    let body = reader.read_body(&child, u64::MAX)?;
+                    state.tables.set(&child.kind, body);
                 }
-                let body = reader.read_body(&child, u64::MAX)?;
-                state.tables.set(&child.kind, body);
             }
             _ => reader.skip_box(&child)?,
         }
