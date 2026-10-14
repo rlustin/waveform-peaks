@@ -74,6 +74,12 @@ impl AacDecoder {
         self.end = end;
     }
 
+    /// Whether every frame up to the end set by [`trim`](Self::trim) is
+    /// decoded.
+    pub(crate) fn past_end(&self) -> bool {
+        self.end.is_some_and(|end| self.decoded >= end)
+    }
+
     /// Decodes one AAC frame. Returns whether any samples are left after
     /// trimming; they are then in [`output`](Self::output).
     pub(crate) fn decode(&mut self, frame: &[u8]) -> Result<bool, Error> {

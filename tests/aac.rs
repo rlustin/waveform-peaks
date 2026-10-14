@@ -422,6 +422,17 @@ fn rejects_other_inputs_and_codecs() {
     assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
 }
 
+/// Nothing after the end of the edit is read, so a file cut there decodes.
+#[test]
+fn stops_at_the_end_of_the_edit() {
+    let mut track = mono_track(10);
+    track.edit = Some((500, PRIMING as i64));
+    let file = faststart_mp4(&[track], 1000, &[], &[]);
+    let cut = file[..file.len() - 100].to_vec();
+    let expected = &adts(MONO)[PRIMING as usize..PRIMING as usize + 22_050];
+    assert_same(&mp4(cut).unwrap(), expected);
+}
+
 fn opus_like_garbage() -> Vec<u8> {
     let mut bytes = b"OggS\0\x02".to_vec();
     bytes.extend([0; 60]);

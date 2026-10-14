@@ -10,6 +10,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Mp4AacSource` is renamed `Mp4Source`, ahead of reading other codecs than
   AAC from MP4. The old name remains as a deprecated alias.
+- `Mp4Source` stops reading at the end of the edit list: a file cut or
+  damaged after the audio it shows decodes, and the rest of the input is
+  not read.
 
 ## [0.1.1] - 2026-10-14
 

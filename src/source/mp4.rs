@@ -60,7 +60,8 @@ impl Default for Mp4Options {
 /// write them.
 ///
 /// A file cut between boxes is not an error: the samples present are decoded.
-/// A cut inside a box is [`Error::InvalidInput`].
+/// A cut inside a box is [`Error::InvalidInput`]. Decoding stops at the end of
+/// the edit list, so what follows is not read.
 pub struct Mp4Source<R: Read> {
     reader: BoxReader<R>,
     decoder: AacDecoder,
@@ -273,7 +274,7 @@ impl<R: Read> PcmSource for Mp4Source<R> {
     }
 
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
-        while !self.finished {
+        while !self.finished && !self.decoder.past_end() {
             let Some((offset, size)) = self.next_sample()? else {
                 self.finished = true;
                 break;
