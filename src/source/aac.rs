@@ -1,15 +1,14 @@
 //! AAC decoding shared by the MP4 and ADTS readers, through Symphonia.
 
 use std::fmt;
-use std::ops::Range;
 
 use symphonia_codec_aac::AacDecoder as SymphoniaDecoder;
-use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::units::{Duration, Timestamp};
 
+use super::symphonia::{Output, symphonia_error};
 use crate::Error;
 
 /// Decodes AAC frames to 16-bit PCM, dropping the encoder priming at the start
@@ -18,12 +17,7 @@ pub(crate) struct AacDecoder {
     decoder: SymphoniaDecoder,
     sample_rate: u32,
     channels: u16,
-    start: u64,
-    end: Option<u64>,
-    decoded: u64,
-    float_pcm: Vec<f32>,
-    pcm: Vec<i16>,
-    kept: Range<usize>,
+    output: Output,
 }
 
 impl AacDecoder {
@@ -33,7 +27,7 @@ impl AacDecoder {
         let mut params = AudioCodecParameters::new();
         params.for_codec(CODEC_ID_AAC).with_extra_data(config);
         let decoder = SymphoniaDecoder::try_new(&params, &AudioDecoderOptions::default())
-            .map_err(symphonia_error)?;
+            .map_err(aac_error)?;
         let params = decoder.codec_params();
         let sample_rate = params
             .sample_rate
@@ -41,17 +35,12 @@ impl AacDecoder {
         let channels = params
             .channels
             .as_ref()
-            .map_or(0, |channels| channels.count());
+            .map_or(0, |channels| channels.count()) as u16;
         Ok(AacDecoder {
             decoder,
             sample_rate,
-            channels: channels as u16,
-            start: 0,
-            end: None,
-            decoded: 0,
-            float_pcm: Vec::new(),
-            pcm: Vec::new(),
-            kept: 0..0,
+            channels,
+            output: Output::new(channels),
         })
     }
 
@@ -66,52 +55,32 @@ impl AacDecoder {
     /// Keeps only frames `start..end` of the decoded stream, counted at the
     /// output rate from the first decoded frame.
     pub(crate) fn trim(&mut self, start: u64, end: Option<u64>) {
-        self.start = start;
-        self.end = end;
+        self.output.trim(start, end);
     }
 
     /// Whether every frame up to the end set by [`trim`](Self::trim) is
     /// decoded.
     pub(crate) fn past_end(&self) -> bool {
-        self.end.is_some_and(|end| self.decoded >= end)
+        self.output.past_end()
     }
 
     /// Decodes one AAC frame. Returns whether any samples are left after
     /// trimming; they are then in [`output`](Self::output).
     pub(crate) fn decode(&mut self, frame: &[u8]) -> Result<bool, Error> {
         let packet = PacketRef::new(0, Timestamp::ZERO, Duration::ZERO, frame);
-        let decoded = self.decoder.decode_ref(&packet).map_err(symphonia_error)?;
-        let GenericAudioBufferRef::F32(buffer) = decoded else {
-            return Err(Error::InvalidInput(
-                "AAC decoder returned non-float samples".into(),
-            ));
-        };
-        buffer.copy_to_vec_interleaved(&mut self.float_pcm);
-        // Scale by 32768 with round-half-to-even and saturation, as FFmpeg
-        // does when converting its AAC decoder's output to 16 bits.
-        self.pcm.clear();
-        self.pcm.extend(
-            self.float_pcm
-                .iter()
-                .map(|&value| (value * 32768.0).round_ties_even() as i16),
-        );
-        let frames = buffer.frames() as u64;
-        let before = self.decoded;
-        self.decoded += frames;
-
-        let start = self.start.saturating_sub(before).min(frames);
-        let end = self
-            .end
-            .map_or(frames, |end| end.saturating_sub(before))
-            .clamp(start, frames);
-        let channels = self.channels as usize;
-        self.kept = start as usize * channels..end as usize * channels;
-        Ok(start < end)
+        let decoded = self.decoder.decode_ref(&packet).map_err(aac_error)?;
+        // Scaled by 32768 with round-half-to-even and saturation, as FFmpeg
+        // converts its AAC decoder's output to 16 bits.
+        self.output.push(
+            decoded,
+            |value| (value * 32768.0).round_ties_even() as i16,
+            "AAC",
+        )
     }
 
     /// Samples kept from the last frame passed to [`decode`](Self::decode).
     pub(crate) fn output(&self) -> &[i16] {
-        &self.pcm[self.kept.clone()]
+        self.output.samples()
     }
 }
 
@@ -120,9 +89,7 @@ impl fmt::Debug for AacDecoder {
         f.debug_struct("AacDecoder")
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
-            .field("start", &self.start)
-            .field("end", &self.end)
-            .field("decoded", &self.decoded)
+            .field("output", &self.output)
             .finish_non_exhaustive()
     }
 }
@@ -227,11 +194,6 @@ impl BitWriter {
     }
 }
 
-fn symphonia_error(err: symphonia_core::errors::Error) -> Error {
-    use symphonia_core::errors::Error as E;
-    match err {
-        E::IoError(err) => Error::Io(err),
-        E::Unsupported(what) => Error::Unsupported(format!("AAC: {what}")),
-        other => Error::InvalidInput(format!("AAC: {other}")),
-    }
+fn aac_error(err: symphonia_core::errors::Error) -> Error {
+    symphonia_error(err, "AAC")
 }

@@ -10,6 +10,8 @@ mod mp4;
 mod ogg_opus;
 #[cfg(feature = "opus")]
 mod opus;
+#[cfg(feature = "aac")]
+mod symphonia;
 #[cfg(feature = "opus")]
 mod webm_opus;
 
