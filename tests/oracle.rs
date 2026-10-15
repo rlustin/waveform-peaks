@@ -150,10 +150,19 @@ fn raw_pcm_json_matches_audiowaveform() {
     }
 }
 
+/// Decodes all of `source`, with its sample rate and channel count.
+#[cfg(any(feature = "opus", feature = "aac"))]
+fn decoded<P: PcmSource>(source: P) -> (Vec<i16>, u32, u16) {
+    let (rate, channels) = (source.sample_rate(), source.channels());
+    (common::samples(source).unwrap(), rate, channels)
+}
+
 #[cfg(feature = "opus")]
 mod opus_input {
     use super::*;
-    use waveform_peaks::{OggOpusSource, OpusOptions, Overflow, WebmOpusSource};
+    use waveform_peaks::{
+        Mp4Options, Mp4Source, OggOpusSource, OpusOptions, Overflow, WebmOpusSource,
+    };
 
     /// Largest accepted per-value difference for Opus input.
     ///
@@ -336,6 +345,59 @@ mod opus_input {
         }
     }
 
+    /// Remuxes `ogg` to MP4 without touching the packets, with the moov box
+    /// first or fragmented as recorders write.
+    fn remux_mp4(ogg: &Path, fragmented: bool) -> std::path::PathBuf {
+        let path = ogg.with_extension(if fragmented { "frag.mp4" } else { "mp4" });
+        let flags = if fragmented {
+            "frag_keyframe+empty_moov+default_base_moof"
+        } else {
+            "+faststart"
+        };
+        let (ogg, out) = (ogg.to_str().unwrap(), path.to_str().unwrap());
+        ffmpeg(&["-i", ogg, "-c", "copy", "-movflags", flags, out]);
+        path
+    }
+
+    /// ffmpeg writes the pre-skip as the edit list's media time, and the
+    /// length in milliseconds, so the end can be up to a millisecond off the
+    /// Ogg granule position. Fragmented files get no edit list: the `dOps`
+    /// pre-skip is trimmed, but not the end padding, which is under one packet.
+    #[test]
+    #[ignore = "needs ffmpeg on PATH"]
+    fn mp4_opus_matches_ogg_on_the_same_packets() {
+        let dir = TempDir::new().unwrap();
+        for fixture in FIXTURES {
+            let ogg = encode(dir.path(), fixture);
+            let (reference, rate, channels) = decoded(
+                OggOpusSource::with_options(fs::File::open(&ogg).unwrap(), wrap()).unwrap(),
+            );
+            for fragmented in [false, true] {
+                let context = format!("{}, fragmented {fragmented}", fixture.name);
+                let mp4 = remux_mp4(&ogg, fragmented);
+                let mut options = Mp4Options::default();
+                options.opus = wrap();
+                let (ours, our_rate, our_channels) = decoded(
+                    Mp4Source::with_options(fs::File::open(&mp4).unwrap(), options).unwrap(),
+                );
+                assert_eq!((our_rate, our_channels), (rate, channels), "{context}");
+                let shared = ours.len().min(reference.len());
+                assert!(
+                    ours[..shared] == reference[..shared],
+                    "{context}: samples differ"
+                );
+                let frames = |samples: &[i16]| (samples.len() / channels as usize) as i64;
+                let extra = frames(&ours) - frames(&reference);
+                let allowed = if fragmented {
+                    0..=rate as i64 / 50
+                } else {
+                    -(rate as i64) / 1000..=rate as i64 / 1000
+                };
+                assert!(allowed.contains(&extra), "{context}: {extra} frames off");
+            }
+        }
+    }
+
     /// Saturation (the default) only changes values where the decoder
     /// overshoots full scale.
     #[test]
@@ -375,7 +437,7 @@ mod opus_input {
 mod aac_input {
     use super::*;
     use std::process::Command;
-    use waveform_peaks::{AdtsAacSource, Mp4AacSource, RawPcmSource};
+    use waveform_peaks::{AdtsAacSource, Mp4Source, RawPcmSource};
 
     /// Largest accepted per-sample difference. Both decoders work in floating
     /// point and round a few samples in ten thousand differently.
@@ -474,16 +536,11 @@ mod aac_input {
 
     fn decode_ours(path: &Path, layout: Layout) -> (Vec<i16>, u32, u16) {
         let file = fs::File::open(path).unwrap();
-        let mut source: Box<dyn PcmSource> = if layout == Layout::Adts {
-            Box::new(AdtsAacSource::new(file).unwrap())
+        if layout == Layout::Adts {
+            decoded(AdtsAacSource::new(file).unwrap())
         } else {
-            Box::new(Mp4AacSource::new(file).unwrap())
-        };
-        let mut samples = Vec::new();
-        while let Some(block) = source.next_block().unwrap() {
-            samples.extend(block);
+            decoded(Mp4Source::new(file).unwrap())
         }
-        (samples, source.sample_rate(), source.channels())
     }
 
     fn decode_ffmpeg(dir: &Path, path: &Path) -> Vec<i16> {

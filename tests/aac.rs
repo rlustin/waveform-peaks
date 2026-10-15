@@ -8,7 +8,7 @@ mod common;
 use std::io::{self, Cursor, Read};
 
 use common::*;
-use waveform_peaks::{AdtsAacSource, Error, Mp4AacSource, Mp4Options, PcmSource};
+use waveform_peaks::{AdtsAacSource, Error, Mp4Options, Mp4Source, PcmSource};
 
 const MONO: &[u8] = include_bytes!("data/sine-mono-44100.aac");
 const STEREO: &[u8] = include_bytes!("data/chord-stereo-48000.aac");
@@ -22,32 +22,16 @@ const HE_AAC: &[u8] = include_bytes!("data/he-aac-apple.m4a");
 const MONO_LENGTH: u64 = 44_673;
 const PRIMING: u64 = 1024;
 
-fn samples<P: PcmSource>(mut source: P) -> Result<Vec<i16>, Error> {
-    let mut samples = Vec::new();
-    while let Some(block) = source.next_block()? {
-        samples.extend(block);
-    }
-    Ok(samples)
-}
-
 fn mp4(bytes: Vec<u8>) -> Result<Vec<i16>, Error> {
     mp4_with(bytes, Mp4Options::default())
 }
 
 fn mp4_with(bytes: Vec<u8>, options: Mp4Options) -> Result<Vec<i16>, Error> {
-    samples(Mp4AacSource::with_options(Cursor::new(bytes), options)?)
+    samples(Mp4Source::with_options(Cursor::new(bytes), options)?)
 }
 
 fn adts(bytes: &[u8]) -> Vec<i16> {
     samples(AdtsAacSource::new(Cursor::new(bytes.to_vec())).unwrap()).unwrap()
-}
-
-/// Like `assert_eq!`, without printing thousands of samples.
-#[track_caller]
-fn assert_same(actual: &[i16], expected: &[i16]) {
-    assert_eq!(actual.len(), expected.len(), "sample count");
-    let first_difference = actual.iter().zip(expected).position(|(a, e)| a != e);
-    assert_eq!(first_difference, None, "first differing sample");
 }
 
 fn mono_track(per_chunk: usize) -> Mp4Track {
@@ -153,7 +137,7 @@ fn edit_list_takes_precedence_over_itunsmpb() {
 
 #[test]
 fn reads_chrome_recordings() {
-    let source = Mp4AacSource::new(Cursor::new(CHROME)).unwrap();
+    let source = Mp4Source::new(Cursor::new(CHROME)).unwrap();
     assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
     // 43 frames of 1,024, with nothing to trim them by, as FFmpeg also decodes
     // it.
@@ -396,11 +380,11 @@ fn rejects_other_inputs_and_codecs() {
         Err(Error::InvalidInput(_))
     ));
 
-    let mut opus = mono_track(10);
-    opus.sample_entry = audio_sample_entry(b"Opus", 1, 48_000, &[]);
-    let result = mp4(faststart_mp4(&[opus], 1000, &[], &[]));
+    let mut ac3 = mono_track(10);
+    ac3.sample_entry = audio_sample_entry(b"ac-3", 1, 48_000, &[]);
+    let result = mp4(faststart_mp4(&[ac3], 1000, &[], &[]));
     assert!(
-        matches!(&result, Err(Error::Unsupported(m)) if m.contains("Opus")),
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("ac-3")),
         "{result:?}"
     );
 
@@ -422,6 +406,53 @@ fn rejects_other_inputs_and_codecs() {
     assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
 }
 
+#[cfg(not(feature = "opus"))]
+#[test]
+fn opus_needs_its_feature() {
+    let mut opus = mono_track(10);
+    opus.sample_entry = audio_sample_entry(b"Opus", 1, 48_000, &dops(1, 312, 48_000, 0));
+    let result = mp4(faststart_mp4(&[opus], 1000, &[], &[]));
+    assert!(
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("opus feature")),
+        "{result:?}"
+    );
+}
+
+/// A track that cannot be decoded is passed over for the next one.
+#[cfg(feature = "opus")]
+#[test]
+fn passes_over_opus_it_cannot_decode() {
+    let mut surround = dops(1, 312, 48_000, 0);
+    surround[18] = 1;
+    let mut opus = Mp4Track::opus(&surround, &[vec![0; 10]], 1);
+    opus.id = 2;
+    let file = faststart_mp4(&[opus, mono_track(10)], 1000, &[], &[]);
+    assert_same(&mp4(file).unwrap(), &adts(MONO));
+}
+
+/// Without the feature, an `Opus` track is not parsed, so its missing `dOps`
+/// box does not reject the file.
+#[cfg(not(feature = "opus"))]
+#[test]
+fn passes_over_opus_without_its_feature() {
+    let mut opus = mono_track(1);
+    opus.id = 2;
+    opus.sample_entry = audio_sample_entry(b"Opus", 1, 48_000, &[]);
+    let file = faststart_mp4(&[opus, mono_track(10)], 1000, &[], &[]);
+    assert_same(&mp4(file).unwrap(), &adts(MONO));
+}
+
+/// Nothing after the end of the edit is read, so a file cut there decodes.
+#[test]
+fn stops_at_the_end_of_the_edit() {
+    let mut track = mono_track(10);
+    track.edit = Some((500, PRIMING as i64));
+    let file = faststart_mp4(&[track], 1000, &[], &[]);
+    let cut = file[..file.len() - 100].to_vec();
+    let expected = &adts(MONO)[PRIMING as usize..PRIMING as usize + 22_050];
+    assert_same(&mp4(cut).unwrap(), expected);
+}
+
 fn opus_like_garbage() -> Vec<u8> {
     let mut bytes = b"OggS\0\x02".to_vec();
     bytes.extend([0; 60]);
@@ -433,7 +464,7 @@ fn opus_like_garbage() -> Vec<u8> {
 /// would reject, gives the same result.
 #[test]
 fn he_aac_decodes_its_core() {
-    let source = Mp4AacSource::new(Cursor::new(HE_AAC.to_vec())).unwrap();
+    let source = Mp4Source::new(Cursor::new(HE_AAC.to_vec())).unwrap();
     assert_eq!((source.sample_rate(), source.channels()), (22_050, 1));
     let core = samples(source).unwrap();
     // iTunSMPB: 1.013 s at the core rate.

@@ -9,17 +9,17 @@ and JSON) from streamed audio.
 PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSink
 (OggOpusSource,             (min/max per             (DatWriter, JsonWriter,
  WebmOpusSource,             output channel)          MemorySink)
- Mp4AacSource,
+ Mp4Source,
  AdtsAacSource,
  RawPcmSource)
 ```
 
 - **`PcmSource`** returns one decoded block at a time, borrowed from its own
   buffer. `OggOpusSource` and `WebmOpusSource` read with plain `Read`, so an
-  upload body can be decoded as it arrives, and so do the AAC readers.
+  upload body can be decoded as it arrives, and so do the MP4 and ADTS readers.
   `WebmOpusSource` also reads Matroska, and browser `MediaRecorder` recordings,
-  whose clusters have no size. `Mp4AacSource` reads fragmented MP4, as Safari
-  records, and MP4 with the `moov` box first.
+  whose clusters have no size. `Mp4Source` reads AAC or Opus from fragmented
+  MP4, as Safari and Chrome record, and from MP4 with the `moov` box first.
 - **`PeakBuilder`** keeps one `(min, max)` accumulator per output channel.
 - **`PeakSink`** receives each point as it completes. `DatWriter` patches the
   length field at the end (needs `Seek`). `JsonWriter` writes `length` after
@@ -46,8 +46,8 @@ the output in memory.
 
 ## Features
 
-The default `opus` feature decodes Opus from Ogg and WebM with libopus, which
-the `opus` crate compiles from source: building it needs `cmake` and a C
+The default `opus` feature decodes Opus from Ogg, WebM and MP4 with libopus,
+which the `opus` crate compiles from source: building it needs `cmake` and a C
 compiler. Without it, only raw PCM input is available:
 
 ```toml
@@ -81,7 +81,11 @@ source (it is GPL-3.0):
 
 audiowaveform does not read WebM. `WebmOpusSource` takes the pre-skip from
 `CodecDelay` and the end trimming from `DiscardPadding`, and on the same packets
-gives exactly the output of `OggOpusSource`.
+gives exactly the output of `OggOpusSource`. Nor does it read Opus in MP4:
+`Mp4Source` trims by the edit list, as the Opus in ISOBMFF specification asks,
+or by the `dOps` pre-skip without one. FFmpeg stores the edit list length in
+milliseconds, so its files can end up to a millisecond off their Ogg source,
+and its fragmented files keep the end padding (under one packet).
 
 audiowaveform does not read AAC either, so AAC output is compared with FFmpeg's
 decoder instead, within ±1 per sample. The encoder priming and padding are
@@ -99,28 +103,31 @@ value with the bundled libopus (see Oracle tests).
 ```sh
 cargo build
 cargo test                             # tool-free tests
-cargo test --all-features              # with AAC
+cargo test --all-features              # with AAC and Opus
+cargo test --no-default-features --features aac
 cargo test --test oracle -- --ignored  # comparison with audiowaveform
 cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
+cargo clippy --no-default-features --features aac --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4_aac, adts_aac
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac
 ```
 
 GitHub Actions runs all of these except the oracle tests on every push and pull
 request, with the tests also on Rust 1.88 and fuzzing limited to one minute per
-target. Clippy runs three times so every feature combination stays clean. `cargo
-deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
+target. Tests and Clippy run on all four feature combinations so each stays
+clean. `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 Fuzzing needs a nightly toolchain and
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Seed
 `fuzz/corpus/<target>` with small files, each prefixed with one byte that the
 target reads as options.
 
-For runs longer than CI's minute, skip `-fork`, whose temporary directories
-fill the disk, and raise `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
-under the sanitizer grows past 512 MB without a leak.
+CI and longer runs use `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
+under the sanitizer grows past 512 MB without a leak, while any single
+allocation over 64 MB still fails. For runs longer than CI's minute, also skip
+`-fork`, whose temporary directories fill the disk.
 
 ### Oracle tests
 
@@ -136,6 +143,8 @@ set `AUDIOWAVEFORM` and `FFMPEG`. They compare:
 - the same fixtures remuxed to WebM, with known and unknown segment sizes:
   exactly equal to this crate's Ogg output, and to audiowaveform's within the
   Opus tolerance;
+- the same fixtures remuxed to fast-start and fragmented MP4: equal to this
+  crate's Ogg output up to FFmpeg's end trimming;
 - AAC encoded by FFmpeg as ADTS, fast-start MP4 and fragmented MP4, and by
   Apple's `afconvert` when available, against FFmpeg's decoder.
 
@@ -155,7 +164,7 @@ exactly.
 - MP4 with its media data before the `moov` box, as FFmpeg and phones write by
   default: it needs a `Read + Seek` constructor for files spooled to disk.
 - HE-AAC's SBR and parametric stereo layers, which Symphonia does not decode.
-- AAC in Matroska or WebM, and Opus in MP4 (Chrome can record both).
+- AAC in Matroska or WebM (Chrome can record it).
 - Matroska beyond what recorders write: compressed or encrypted tracks, and
   files with several segments (only the first is decoded).
 - Several zoom levels in one pass.

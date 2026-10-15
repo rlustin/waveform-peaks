@@ -1,5 +1,5 @@
-//! Generates a `.dat` or `.json` waveform from an Ogg Opus or WebM Opus file,
-//! or with the `aac` feature an MP4 or ADTS AAC file.
+//! Generates a `.dat` or `.json` waveform from an Opus file in Ogg, WebM or
+//! MP4, or with the `aac` feature an MP4 or ADTS AAC file.
 //!
 //! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split]
 
@@ -13,8 +13,8 @@ use std::{
 
 use tempfile::NamedTempFile;
 use waveform_peaks::{
-    Bits, ChannelMode, DatWriter, Error, JsonWriter, Limits, OggOpusSource, Options, PcmSource,
-    WebmOpusSource, generate,
+    Bits, ChannelMode, DatWriter, Error, JsonWriter, Limits, Mp4Source, OggOpusSource, Options,
+    PcmSource, WebmOpusSource, generate,
 };
 
 fn main() -> ExitCode {
@@ -60,15 +60,14 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     if webm {
         return Ok(Box::new(WebmOpusSource::new(input)?));
     }
-    #[cfg(feature = "aac")]
     if mp4 {
-        return Ok(Box::new(waveform_peaks::Mp4AacSource::new(input)?));
+        return Ok(Box::new(Mp4Source::new(input)?));
     }
     #[cfg(feature = "aac")]
     if adts {
         return Ok(Box::new(waveform_peaks::AdtsAacSource::new(input)?));
     }
-    if mp4 || adts {
+    if adts {
         return Err(Error::Unsupported("AAC needs the aac feature".into()));
     }
     Err(Error::Unsupported("not Ogg, WebM, MP4 or ADTS".into()))

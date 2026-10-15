@@ -1,6 +1,6 @@
 [package]
 name = "waveform-peaks"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,7 @@ all-features = true
 
 [features]
 default = ["opus"]
-# Ogg Opus decoding through libopus.
+# Opus decoding in Ogg, WebM and MP4 through libopus.
 opus = ["dep:ogg", "dep:opus"]
 # AAC decoding in MP4 and ADTS through Symphonia (MPL-2.0).
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]

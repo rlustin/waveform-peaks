@@ -12,10 +12,6 @@ use symphonia_core::units::{Duration, Timestamp};
 
 use crate::Error;
 
-/// Largest AAC frame accepted. An AAC-LC frame holds at most 6144 bits per
-/// channel, so a valid stereo frame is under 2 KiB.
-pub(crate) const MAX_FRAME_BYTES: usize = 64 * 1024;
-
 /// Decodes AAC frames to 16-bit PCM, dropping the encoder priming at the start
 /// and the padding at the end.
 pub(crate) struct AacDecoder {
@@ -72,6 +68,12 @@ impl AacDecoder {
     pub(crate) fn trim(&mut self, start: u64, end: Option<u64>) {
         self.start = start;
         self.end = end;
+    }
+
+    /// Whether every frame up to the end set by [`trim`](Self::trim) is
+    /// decoded.
+    pub(crate) fn past_end(&self) -> bool {
+        self.end.is_some_and(|end| self.decoded >= end)
     }
 
     /// Decodes one AAC frame. Returns whether any samples are left after
