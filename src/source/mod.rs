@@ -4,19 +4,23 @@
 mod aac;
 #[cfg(feature = "aac")]
 mod adts_aac;
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 mod mp4;
+#[cfg(feature = "mp3")]
+mod mpa;
+#[cfg(feature = "mp3")]
+mod mpeg_audio;
 #[cfg(feature = "opus")]
 mod ogg_opus;
 #[cfg(feature = "opus")]
 mod opus;
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "aac", feature = "mp3"))]
 mod symphonia;
 #[cfg(feature = "opus")]
 mod webm_opus;
 
 use std::fmt;
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 use std::io::{self, BufReader};
 use std::io::{ErrorKind, Read};
 
@@ -25,8 +29,10 @@ pub use adts_aac::AdtsAacSource;
 #[cfg(feature = "aac")]
 #[allow(deprecated)]
 pub use mp4::Mp4AacSource;
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 pub use mp4::{Mp4Options, Mp4Source};
+#[cfg(feature = "mp3")]
+pub use mpeg_audio::MpegAudioSource;
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]
@@ -151,14 +157,43 @@ pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize
     Ok(filled)
 }
 
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "aac", feature = "mp3"))]
+/// Skips ID3v2 tags, which some encoders put before the first frame of an
+/// ADTS or MPEG audio stream. Returns the bytes read past them, the start of
+/// the first frame header, and their count.
+pub(crate) fn skip_id3v2<R: Read>(reader: &mut R) -> Result<([u8; 3], usize), Error> {
+    loop {
+        let mut start = [0u8; 3];
+        let read = read_full(reader, &mut start)?;
+        if &start[..read] != b"ID3" {
+            return Ok((start, read));
+        }
+        let mut header = [0u8; 10];
+        header[..3].copy_from_slice(b"ID3");
+        if read_full(reader, &mut header[3..])? < header.len() - 3 {
+            return Err(invalid("truncated ID3v2 tag"));
+        }
+        // A syncsafe size: 7 bits per byte. A footer adds 10 bytes.
+        let size = header[6..10]
+            .iter()
+            .fold(0u64, |size, &byte| size << 7 | (byte & 0x7F) as u64);
+        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+        let len = size + footer;
+        let skipped = io::copy(&mut reader.by_ref().take(len), &mut io::sink())?;
+        if skipped < len {
+            return Err(invalid("truncated ID3v2 tag"));
+        }
+    }
+}
+
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 pub(crate) fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
 }
 
 /// Buffers a plain `Read` and counts the bytes consumed, so that containers
 /// can tell where a parent of known size ends without `Seek`.
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 pub(crate) struct CountingReader<R> {
     reader: BufReader<R>,
     position: u64,
@@ -166,7 +201,7 @@ pub(crate) struct CountingReader<R> {
     truncated: &'static str,
 }
 
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 impl<R: Read> CountingReader<R> {
     pub(crate) fn new(reader: R, truncated: &'static str) -> Self {
         CountingReader {

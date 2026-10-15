@@ -35,6 +35,8 @@ Decoding is CPU-bound, so the API is synchronous. In an async server, run
 | `Mp4Source` | MP4 | Opus | `opus` (default) |
 | `Mp4Source` | MP4 | AAC-LC | `aac` |
 | `AdtsAacSource` | ADTS | AAC-LC | `aac` |
+| `Mp4Source` | MP4 | MP1, MP2, MP3 | `mp3` |
+| `MpegAudioSource` | MPEG audio (`.mp3`, `.mp2`) | MP1, MP2, MP3 | `mp3` |
 | `RawPcmSource` | none | Interleaved signed 16-bit little-endian PCM | none |
 
 Each source reads from a plain `Read`. Thus a source can decode an upload body
@@ -74,6 +76,15 @@ feature is off by default:
 waveform-peaks = { version = "0.1", features = ["aac"] }
 ```
 
+The optional `mp3` feature decodes MPEG audio from MP4 and from MPEG audio
+streams with Symphonia's pure-Rust decoder. MPEG audio here means MPEG-1,
+MPEG-2 and MPEG-2.5 audio, layers I to III (MP1, MP2 and MP3). This feature
+also uses Symphonia, so it is off by default:
+
+```toml
+waveform-peaks = { version = "0.1", features = ["mp3"] }
+```
+
 ## Compatibility with audiowaveform
 
 The rules below come from black-box tests of audiowaveform 1.11.1. They do not
@@ -90,6 +101,9 @@ come from the audiowaveform source code, which has the GPL-3.0 license.
 | Opus decode rate | The smallest of 8, 12, 16, 24 and 48 kHz that is at or above the `OpusHead` input rate; 48 kHz at most |
 | Opus samples | Float output × 32767, rounded half to even; values out of range wrap (`Overflow::Wrap`) |
 | Opus framing | Pre-skip trimmed, end trimmed to the last granule position, output gain applied |
+| MP3 framing | Frame with a Xing or Info tag not decoded; encoder delay + 529 frames trimmed if the LAME extension names `LAME` or `Lavc`; end padding kept |
+| MPEG audio samples | Float output × 32768, rounded down; values at or below -1.0 clip to -32767 |
+| Cut MPEG audio stream | Incomplete last frame dropped |
 
 audiowaveform does not read Opus in WebM or MP4. Thus the tests compare these
 sources with `OggOpusSource` on the same packets:
@@ -114,6 +128,20 @@ FFmpeg decoder, with a tolerance of ±1 per sample:
   AAC-LC core. The output has half the sample rate, and does not have the
   upper part of the spectrum.
 
+audiowaveform decodes MPEG audio with libmad, which uses fixed-point
+arithmetic. Symphonia uses floating-point arithmetic. Thus the values from
+`MpegAudioSource` can differ by ±1 from the audiowaveform output. The length
+of the output is the same.
+
+audiowaveform does not read MPEG audio in MP4. Thus the tests compare
+`Mp4Source` with the FFmpeg decoder, with a tolerance of ±1 per sample:
+
+- `Mp4Source` trims by the MP4 edit list. FFmpeg trims only the start.
+- FFmpeg writes an edit list for MP2 in MP4. This edit list ends 481 frames
+  before the end of the input.
+- An MPEG audio stream does not record the MP2 encoder delay. Thus
+  `MpegAudioSource` trims nothing from MP2, as audiowaveform does.
+
 The default is `Overflow::Saturate`, because with wrapping, clipped audio
 shows as less than full scale. To match audiowaveform, use `Overflow::Wrap`.
 With the bundled libopus, the output is then within ±1 per value of the
@@ -124,22 +152,25 @@ audiowaveform output (see Oracle tests).
 ```sh
 cargo build
 cargo test                             # tests without external tools
-cargo test --all-features              # with AAC and Opus
+cargo test --all-features              # with all features
 cargo test --no-default-features --features aac
-cargo test --test oracle -- --ignored  # comparison with audiowaveform
+cargo test --no-default-features --features mp3
+cargo test --test oracle --all-features -- --ignored  # comparison with audiowaveform
 cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
 cargo clippy --no-default-features --features aac --all-targets -- -D warnings
+cargo clippy --no-default-features --features mp3 --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio
 ```
 
 GitHub Actions runs all of these commands, except the oracle tests, on each
 push and pull request. CI also runs the tests on Rust 1.88, and runs each fuzz
-target for one minute. Tests and Clippy run on all four feature combinations,
-so that each combination stays clean.
+target for one minute. Tests and Clippy run on five feature combinations
+(default, none, `aac` only, `mp3` only, and all), so that each combination
+stays clean.
 
 `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 Fuzzing needs a nightly toolchain and
@@ -155,7 +186,8 @@ directories of `-fork` fill the disk.
 
 ### Oracle tests
 
-The oracle tests need `audiowaveform`, and `ffmpeg` with libopus, on `PATH`.
+The oracle tests need `audiowaveform`, and `ffmpeg` with libopus and
+libmp3lame, on `PATH`.
 Alternatively, set `AUDIOWAVEFORM` and `FFMPEG` to the paths of the two
 programs. The tests compare:
 
@@ -172,7 +204,13 @@ programs. The tests compare:
   be equal to the Ogg output of this crate, except for the FFmpeg end trimming;
 - AAC that FFmpeg encodes as ADTS, fast-start MP4 and fragmented MP4, and AAC
   from Apple `afconvert` if it is available. The reference is the FFmpeg
-  decoder.
+  decoder;
+- MP3 and MP2 that FFmpeg encodes, with and without an Info tag: MPEG-1,
+  MPEG-2 and MPEG-2.5, constant and variable bit rates, and a square wave that
+  clips. The reference is audiowaveform, with a tolerance of ±1 per value;
+- the same MPEG audio fixtures in fast-start MP4, fragmented MP4 and
+  QuickTime. The reference is the FFmpeg decoder, with a tolerance of ±1 per
+  sample.
 
 Opus comparisons accept a difference of ±1 per value. The `opus` crate bundles
 its own libopus build. The float output of this build is different in the last
@@ -186,13 +224,17 @@ this crate, the output is the same as the audiowaveform output.
 - For chained Ogg files, `OggOpusSource` decodes only the first link.
 - `OggOpusSource` rejects an Ogg file if its first page belongs to a Skeleton
   stream, because the source decodes only the stream of the first page.
-- Other formats (WAV, FLAC, MP3, Vorbis) are not supported. Symphonia can
+- Other formats (WAV, FLAC, Vorbis) are not supported. Symphonia can
   decode them, but each of its format crates needs an MPL-2.0 exception in
   `deny.toml`.
 - `Mp4Source` rejects MP4 with the media data before the `moov` box. FFmpeg and
   phones write this layout by default. To read this layout, the crate needs a
   `Read + Seek` constructor for files spooled to disk.
 - Symphonia does not decode the SBR and parametric stereo layers of HE-AAC.
+- `MpegAudioSource` rejects data between frames. libmad skips this data.
+- `MpegAudioSource` and `Mp4Source` reject free-format bit rates.
+- `Mp4Source` rejects an MP4 sample that holds more than one MPEG audio
+  frame.
 - AAC in Matroska or WebM is not supported. Chrome can record this
   combination.
 - `WebmOpusSource` skips compressed and encrypted tracks. For a file with
@@ -211,9 +253,9 @@ for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
 `deny.toml` accepts only permissive licenses for dependencies. The exception is
-the Symphonia crates, which the optional `aac` feature uses. These crates have
-the MPL-2.0 license, a file-level copyleft that applies only to the Symphonia
-files:
+the Symphonia crates, which the optional `aac` and `mp3` features use. These
+crates have the MPL-2.0 license, a file-level copyleft that applies only to the
+Symphonia files:
 
 - A binary that includes these crates must tell where their source code is
   available.

@@ -184,6 +184,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 
 [[package]]
+name = "symphonia-bundle-mp3"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
 name = "symphonia-codec-aac"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,6 +250,7 @@ version = "0.1.2"
 dependencies = [
  "ogg",
  "opus",
+ "symphonia-bundle-mp3",
  "symphonia-codec-aac",
  "symphonia-core",
 ]

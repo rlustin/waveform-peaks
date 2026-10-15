@@ -1,10 +1,10 @@
 //! AAC in ADTS, the framing of raw `.aac` files, through Symphonia.
 
 use std::fmt;
-use std::io::{self, BufReader, Read};
+use std::io::{BufReader, Read};
 
 use super::aac::AacDecoder;
-use super::read_full;
+use super::{read_full, skip_id3v2};
 use crate::{Error, PcmSource};
 
 /// Length of an ADTS header without its CRC.
@@ -182,34 +182,6 @@ fn read_frame<R: Read>(
         return Err(truncated());
     }
     Ok(Some(header))
-}
-
-/// Skips ID3v2 tags, which some encoders put before the first frame. Returns
-/// the bytes read past them, the start of the first ADTS header, and their
-/// count.
-fn skip_id3v2<R: Read>(reader: &mut R) -> Result<([u8; 3], usize), Error> {
-    loop {
-        let mut start = [0u8; 3];
-        let read = read_full(reader, &mut start)?;
-        if &start[..read] != b"ID3" {
-            return Ok((start, read));
-        }
-        let mut header = [0u8; 10];
-        header[..3].copy_from_slice(b"ID3");
-        if read_full(reader, &mut header[3..])? < header.len() - 3 {
-            return Err(truncated());
-        }
-        // A syncsafe size: 7 bits per byte. A footer adds 10 bytes.
-        let size = header[6..10]
-            .iter()
-            .fold(0u64, |size, &byte| size << 7 | (byte & 0x7F) as u64);
-        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
-        let len = size + footer;
-        let skipped = io::copy(&mut reader.by_ref().take(len), &mut io::sink())?;
-        if skipped < len {
-            return Err(truncated());
-        }
-    }
 }
 
 fn truncated() -> Error {

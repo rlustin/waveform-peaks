@@ -3,12 +3,12 @@
 //! Each test feeds the same input to audiowaveform and to this crate, then
 //! compares the outputs. No audiowaveform source is used.
 //!
-//! These tests need `audiowaveform` and `ffmpeg` (built with libopus) on
-//! `PATH`, or their paths in `AUDIOWAVEFORM` and `FFMPEG`. They are ignored by
-//! default:
+//! These tests need `audiowaveform` and `ffmpeg` (built with libopus and
+//! libmp3lame) on `PATH`, or their paths in `AUDIOWAVEFORM` and `FFMPEG`. They
+//! are ignored by default:
 //!
 //! ```sh
-//! cargo test --test oracle -- --ignored
+//! cargo test --test oracle --all-features -- --ignored
 //! ```
 
 mod common;
@@ -22,7 +22,7 @@ use waveform_peaks::{
     generate,
 };
 
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 fn ffmpeg(args: &[&str]) {
     run(
         &tool("FFMPEG", "ffmpeg"),
@@ -151,7 +151,7 @@ fn raw_pcm_json_matches_audiowaveform() {
 }
 
 /// Decodes all of `source`, with its sample rate and channel count.
-#[cfg(any(feature = "opus", feature = "aac"))]
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 fn decoded<P: PcmSource>(source: P) -> (Vec<i16>, u32, u16) {
     let (rate, channels) = (source.sample_rate(), source.channels());
     (common::samples(source).unwrap(), rate, channels)
@@ -634,6 +634,279 @@ mod aac_input {
                     &peaks(theirs, rate, channels),
                     AAC_TOLERANCE,
                     &context,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mp3")]
+mod mpeg_audio_input {
+    use super::*;
+    use waveform_peaks::{Mp4Source, MpegAudioSource};
+
+    /// Largest accepted per-value difference. libmad, which audiowaveform
+    /// decodes with, works in fixed point and Symphonia in floating point.
+    const MPA_TOLERANCE: i32 = 1;
+
+    struct Fixture {
+        name: &'static str,
+        source: &'static str,
+        channels: u16,
+        rate: u32,
+        seconds: f64,
+        /// FFmpeg codec arguments.
+        codec: &'static [&'static str],
+    }
+
+    const FIXTURES: &[Fixture] = &[
+        Fixture {
+            name: "mp3-mono-44k1",
+            source: "sine=frequency=440:sample_rate=44100:duration=1.013",
+            channels: 1,
+            rate: 44_100,
+            seconds: 1.013,
+            codec: &["-c:a", "libmp3lame", "-b:a", "128k"],
+        },
+        Fixture {
+            name: "mp3-vbr-stereo-48k",
+            source: "aevalsrc=exprs=0.5*sin(440*2*PI*t)|0.3*sin(660*2*PI*t)+0.1*sin(5000*2*PI*t):s=48000:d=1.2345",
+            channels: 2,
+            rate: 48_000,
+            seconds: 1.2345,
+            codec: &["-c:a", "libmp3lame", "-q:a", "2"],
+        },
+        Fixture {
+            name: "mp3-mpeg2-stereo-22k05",
+            source: "anoisesrc=d=2.1:c=pink:r=22050:a=0.5:seed=42",
+            channels: 2,
+            rate: 22_050,
+            seconds: 2.1,
+            codec: &["-c:a", "libmp3lame", "-b:a", "64k"],
+        },
+        Fixture {
+            name: "mp3-mpeg2.5-mono-8k",
+            source: "sine=frequency=440:sample_rate=8000:duration=1.5",
+            channels: 1,
+            rate: 8_000,
+            seconds: 1.5,
+            codec: &["-c:a", "libmp3lame", "-b:a", "16k"],
+        },
+        Fixture {
+            name: "mp3-clipping-square",
+            source: "aevalsrc=exprs=sgn(sin(440*2*PI*t)):s=44100:d=1",
+            channels: 1,
+            rate: 44_100,
+            seconds: 1.0,
+            codec: &["-c:a", "libmp3lame", "-b:a", "320k"],
+        },
+        Fixture {
+            // Overshoots full scale, where libmad clips at -32767.
+            name: "mp3-overdriven-square",
+            source: "aevalsrc=exprs=1.2*sgn(sin(440*2*PI*t)):s=44100:d=1",
+            channels: 1,
+            rate: 44_100,
+            seconds: 1.0,
+            codec: &["-c:a", "libmp3lame", "-b:a", "320k"],
+        },
+        Fixture {
+            name: "mp2-stereo-48k",
+            source: "aevalsrc=exprs=0.5*sin(440*2*PI*t)|0.3*sin(660*2*PI*t):s=48000:d=1.2345",
+            channels: 2,
+            rate: 48_000,
+            seconds: 1.2345,
+            codec: &["-c:a", "mp2", "-b:a", "192k"],
+        },
+        Fixture {
+            name: "mp2-mono-32k",
+            source: "anoisesrc=d=1.1:c=pink:r=32000:a=0.5:seed=7",
+            channels: 1,
+            rate: 32_000,
+            seconds: 1.1,
+            codec: &["-c:a", "mp2", "-b:a", "96k"],
+        },
+    ];
+
+    fn encode(
+        dir: &Path,
+        fixture: &Fixture,
+        extra: &[&str],
+        extension: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join(format!("{}{}.{extension}", fixture.name, extra.join("")));
+        let channels = fixture.channels.to_string();
+        let input = [
+            "-f",
+            "lavfi",
+            "-i",
+            fixture.source,
+            "-ac",
+            channels.as_str(),
+        ];
+        ffmpeg(&[&input[..], fixture.codec, extra, &[path.to_str().unwrap()]].concat());
+        path
+    }
+
+    #[test]
+    #[ignore = "needs audiowaveform and ffmpeg on PATH"]
+    fn mpeg_audio_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let option_sets = [
+            options(64, Bits::Sixteen, ChannelMode::Split),
+            options(256, Bits::Sixteen, ChannelMode::Mixdown),
+            options(32, Bits::Eight, ChannelMode::Mixdown),
+        ];
+        for fixture in FIXTURES {
+            let extension = if fixture.name.starts_with("mp2") {
+                "mp2"
+            } else {
+                "mp3"
+            };
+            // Without a Xing or Info tag, nothing is trimmed.
+            for extra in [&[][..], &["-write_xing", "0"]] {
+                let path = encode(dir.path(), fixture, extra, extension);
+                for options in &option_sets {
+                    let context = format!("{}{extra:?}, {options:?}", fixture.name);
+                    let mut source = MpegAudioSource::new(fs::File::open(&path).unwrap()).unwrap();
+                    assert_eq!(
+                        (source.sample_rate(), source.channels()),
+                        (fixture.rate, fixture.channels),
+                        "{context}"
+                    );
+                    let ours = ours_dat(&mut source, options);
+                    let theirs = reference(
+                        &path,
+                        &["--input-format", "mp3"],
+                        options,
+                        &dir.path().join("reference.dat"),
+                    );
+                    assert_dat_matches(&ours, &theirs, MPA_TOLERANCE, &context);
+                    // The tolerance would hide a clipping difference.
+                    let extremes = |dat: &[u8]| {
+                        let values = common::parse_dat(dat).values;
+                        (values.iter().min().copied(), values.iter().max().copied())
+                    };
+                    assert_eq!(extremes(&ours), extremes(&theirs), "{context}");
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Layout {
+        FastStart,
+        Fragmented,
+        /// QuickTime, with a `.mp3` or `.mp2` sample entry.
+        Mov,
+    }
+
+    fn encode_mp4(dir: &Path, fixture: &Fixture, layout: Layout) -> std::path::PathBuf {
+        let (extension, flags): (_, &[&str]) = match layout {
+            Layout::FastStart => ("mp4", &["-movflags", "+faststart"]),
+            Layout::Fragmented => (
+                "mp4",
+                &[
+                    "-movflags",
+                    "frag_keyframe+empty_moov+default_base_moof",
+                    "-frag_duration",
+                    "300000",
+                ],
+            ),
+            Layout::Mov => ("mov", &["-movflags", "+faststart"]),
+        };
+        let path = dir.join(format!("{}-{layout:?}.{extension}", fixture.name));
+        let channels = fixture.channels.to_string();
+        let input = [
+            "-f",
+            "lavfi",
+            "-i",
+            fixture.source,
+            "-ac",
+            channels.as_str(),
+        ];
+        // MPEG-2.5 rates are not standard in MP4.
+        let strict = ["-strict", "-1"];
+        ffmpeg(
+            &[
+                &input[..],
+                fixture.codec,
+                flags,
+                &strict,
+                &[path.to_str().unwrap()],
+            ]
+            .concat(),
+        );
+        path
+    }
+
+    /// FFmpeg's float decoder, scaled as this crate scales Symphonia's output.
+    fn decode_ffmpeg(dir: &Path, path: &Path) -> Vec<i16> {
+        let raw = dir.join("reference.f32");
+        ffmpeg(&[
+            "-i",
+            path.to_str().unwrap(),
+            "-f",
+            "f32le",
+            raw.to_str().unwrap(),
+        ]);
+        fs::read(&raw)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&bytes| (f32::from_le_bytes(bytes) * 32768.0).floor() as i16)
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs ffmpeg on PATH"]
+    fn mp4_matches_ffmpeg() {
+        let dir = TempDir::new().unwrap();
+        for fixture in FIXTURES {
+            for layout in [Layout::FastStart, Layout::Fragmented, Layout::Mov] {
+                let context = format!("{}, {layout:?}", fixture.name);
+                let path = encode_mp4(dir.path(), fixture, layout);
+                let (ours, rate, channels) =
+                    decoded(Mp4Source::new(fs::File::open(&path).unwrap()).unwrap());
+                assert_eq!(
+                    (rate, channels),
+                    (fixture.rate, fixture.channels),
+                    "{context}"
+                );
+                let theirs = decode_ffmpeg(dir.path(), &path);
+                match layout {
+                    // No edit list: both decode every frame.
+                    Layout::Fragmented => assert_eq!(ours.len(), theirs.len(), "{context}"),
+                    // Both trim the start by the edit list, but FFmpeg keeps
+                    // what follows its end.
+                    // FFmpeg's edit list stores the duration in milliseconds.
+                    // For MP2 it ends the encoder delay, 481 frames, before
+                    // the end of the input.
+                    Layout::FastStart | Layout::Mov => {
+                        let frames = (ours.len() / channels as usize) as f64;
+                        let delay = if fixture.name.starts_with("mp2") {
+                            481.0
+                        } else {
+                            0.0
+                        };
+                        let expected = fixture.seconds * rate as f64 - delay;
+                        assert!(
+                            (frames - expected).abs() <= rate as f64 / 1000.0,
+                            "{context}: {frames} frames"
+                        );
+                        assert!(ours.len() <= theirs.len(), "{context}");
+                    }
+                }
+                let theirs = &theirs[..ours.len()];
+                let worst = ours
+                    .iter()
+                    .zip(theirs)
+                    .map(|(&a, &b)| (a as i32 - b as i32).abs())
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= MPA_TOLERANCE,
+                    "{context}: samples differ by {worst}"
                 );
             }
         }
