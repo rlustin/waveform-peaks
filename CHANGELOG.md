@@ -4,7 +4,7 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] - 2026-10-15
 
 ### Added
 
@@ -55,7 +55,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AAC input from MP4 (fragmented or with the `moov` box first) and ADTS,
   behind the optional `aac` feature.
 
-[Unreleased]: https://github.com/rlustin/waveform-peaks/compare/v0.1.2...HEAD
+[0.1.3]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.3
 [0.1.2]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.0
