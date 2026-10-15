@@ -1,7 +1,7 @@
 # waveform-peaks
 
-Constant-memory generation of BBC audiowaveform-compatible peak data (`.dat`
-and JSON) from streamed audio.
+Generates BBC audiowaveform-compatible peak data (`.dat` and JSON) from
+streamed audio, with constant memory use.
 
 ## Usage
 
@@ -11,15 +11,20 @@ let output = File::create("upload.dat")?;
 generate(&mut source, &Options::default(), &Limits::default(), DatWriter::new(output))?;
 ```
 
-`generate` enforces `Limits` (channel count, duration) as blocks arrive.
-Points reach the output as they complete, so a failed run leaves a partial
-file. Write to a temporary path and rename it on success. `DatWriter` patches
-the length field at the end (needs `Seek`). `JsonWriter` writes `length` after
-`data`, so it needs no `Seek`.
+`generate` checks each block against `Limits` (channel count and duration)
+when the block arrives.
 
-The API is synchronous because decoding is CPU-bound. In an async server, run
-`generate` with `spawn_blocking` and read the upload through `tokio-util`'s
-`SyncIoBridge`; the crate docs have an example.
+`generate` writes each point as soon as the point is complete. If the run
+fails, the output file is incomplete. Thus, write to a temporary path, and
+rename the file only when `generate` succeeds.
+
+`DatWriter` needs an output that implements `Seek`, because it writes the
+length field of the header last. `JsonWriter` writes `length` after `data`, so
+any `Write` output is sufficient.
+
+Decoding is CPU-bound, so the API is synchronous. In an async server, run
+`generate` with `spawn_blocking`, and read the upload through the
+`SyncIoBridge` of `tokio-util`. The crate documentation has an example.
 
 ## Supported input
 
@@ -32,30 +37,38 @@ The API is synchronous because decoding is CPU-bound. In an async server, run
 | `AdtsAacSource` | ADTS | AAC-LC | `aac` |
 | `RawPcmSource` | none | Interleaved signed 16-bit little-endian PCM | none |
 
-Every source reads with plain `Read`, so an upload body can be decoded as it
-arrives. `WebmOpusSource` also reads browser `MediaRecorder` recordings, whose
-clusters have no size. `Mp4Source` reads fragmented MP4, as Safari and Chrome
-record, and MP4 with the `moov` box first.
+Each source reads from a plain `Read`. Thus a source can decode an upload body
+while the upload continues.
+
+`WebmOpusSource` also reads browser `MediaRecorder` recordings, which have
+clusters of unknown size. `Mp4Source` reads fragmented MP4, which Safari and
+Chrome record, and MP4 that has the `moov` box first.
 
 ## Memory use
 
-On a one-hour stereo Opus file, in Ogg or WebM, peak memory is 2 MB at zoom 256
-and at zoom 32, against 15 MB and 64 MB for audiowaveform 1.11.1, which keeps
-the output in memory.
+Peak memory use for a one-hour stereo Opus file, in Ogg or WebM:
+
+| Zoom | waveform-peaks | audiowaveform 1.11.1 |
+|---|---|---|
+| 256 | 2 MB | 15 MB |
+| 32 | 2 MB | 64 MB |
+
+audiowaveform keeps all of the output in memory, so its memory use increases
+when the zoom decreases.
 
 ## Features
 
-The default `opus` feature decodes Opus from Ogg, WebM and MP4 with libopus,
-which the `opus` crate compiles from source: building it needs `cmake` and a C
-compiler. Without it, only raw PCM input is available:
+The default `opus` feature decodes Opus from Ogg, WebM and MP4 with libopus.
+The `opus` crate compiles libopus from source, so the build needs `cmake` and a
+C compiler. With no features, only raw PCM input is available:
 
 ```toml
 waveform-peaks = { version = "0.1", default-features = false }
 ```
 
 The optional `aac` feature decodes AAC-LC from MP4 and ADTS with Symphonia's
-pure-Rust decoder. Symphonia is MPL-2.0 (see License), so the feature is off
-by default:
+pure-Rust decoder. Symphonia has the MPL-2.0 license (see License), so this
+feature is off by default:
 
 ```toml
 waveform-peaks = { version = "0.1", features = ["aac"] }
@@ -63,45 +76,54 @@ waveform-peaks = { version = "0.1", features = ["aac"] }
 
 ## Compatibility with audiowaveform
 
-These rules come from black-box probing of audiowaveform 1.11.1, not from its
-source (it is GPL-3.0):
+The rules below come from black-box tests of audiowaveform 1.11.1. They do not
+come from the audiowaveform source code, which has the GPL-3.0 license.
 
 | Rule | Behaviour |
 |---|---|
 | Mixdown | Average of each frame, integer division truncating toward zero |
 | 8-bit output | 16-bit peak divided by 256, truncating toward zero |
 | `.dat` version | 1 for one output channel, 2 otherwise; JSON is always version 2 |
-| Trailing partial block | Emitted as a point |
+| Trailing partial block | Written as a point |
 | Zoom | At least 2 |
-| `--amplitude-scale` | No effect on `.dat`/JSON (images only), so not in the API |
-| Opus decode rate | Smallest of 8/12/16/24/48 kHz at or above the `OpusHead` input rate, capped at 48 kHz |
-| Opus samples | Float decode × 32767, rounded half to even; overshoot wraps (`Overflow::Wrap`) |
-| Opus framing | Pre-skip dropped, end trimmed to the last granule position, output gain applied |
+| `--amplitude-scale` | Changes images only, not `.dat` or JSON, so the API does not have it |
+| Opus decode rate | The smallest of 8, 12, 16, 24 and 48 kHz that is at or above the `OpusHead` input rate; 48 kHz at most |
+| Opus samples | Float output × 32767, rounded half to even; values out of range wrap (`Overflow::Wrap`) |
+| Opus framing | Pre-skip trimmed, end trimmed to the last granule position, output gain applied |
 
-audiowaveform does not read WebM. `WebmOpusSource` takes the pre-skip from
-`CodecDelay` and the end trimming from `DiscardPadding`, and on the same packets
-gives exactly the output of `OggOpusSource`. Nor does it read Opus in MP4:
-`Mp4Source` trims by the edit list, as the Opus in ISOBMFF specification asks,
-or by the `dOps` pre-skip without one. FFmpeg stores the edit list length in
-milliseconds, so its files can end up to a millisecond off their Ogg source,
-and its fragmented files keep the end padding (under one packet).
+audiowaveform does not read Opus in WebM or MP4. Thus the tests compare these
+sources with `OggOpusSource` on the same packets:
 
-audiowaveform does not read AAC either, so AAC output is compared with FFmpeg's
-decoder instead, within ±1 per sample. The encoder priming and padding are
-trimmed using the MP4 edit list, or Apple's `iTunSMPB` tag without one; FFmpeg
-trims the priming only. ADTS records neither, so nothing is trimmed. Symphonia
-decodes AAC-LC only: HE-AAC decodes as its AAC-LC core, at half the sample rate
-and without the top of the spectrum.
+- `WebmOpusSource` gets the pre-skip from `CodecDelay` and the end trimming
+  from `DiscardPadding`. Its output is the same as the output of
+  `OggOpusSource`.
+- `Mp4Source` trims by the edit list, as the Opus in ISOBMFF specification
+  tells. If there is no edit list, `Mp4Source` trims by the `dOps` pre-skip.
+- FFmpeg writes the edit list length in milliseconds. Thus the end of an
+  FFmpeg MP4 file can differ from its Ogg source by up to 1 ms. A fragmented
+  MP4 file from FFmpeg also keeps the end padding (less than one packet).
 
-`Overflow::Saturate` is the default because wrapping makes clipped audio read
-below full scale. Use `Overflow::Wrap` to match audiowaveform: within ±1 per
-value with the bundled libopus (see Oracle tests).
+audiowaveform does not read AAC. Thus the tests compare AAC output with the
+FFmpeg decoder, with a tolerance of ±1 per sample:
+
+- `Mp4Source` trims the encoder priming and padding by the MP4 edit list. If
+  there is no edit list, `Mp4Source` uses the Apple `iTunSMPB` tag. FFmpeg
+  trims only the priming.
+- An ADTS stream records neither value, so `AdtsAacSource` trims nothing.
+- Symphonia decodes only AAC-LC. For HE-AAC input, Symphonia decodes only the
+  AAC-LC core. The output has half the sample rate, and does not have the
+  upper part of the spectrum.
+
+The default is `Overflow::Saturate`, because with wrapping, clipped audio
+shows as less than full scale. To match audiowaveform, use `Overflow::Wrap`.
+With the bundled libopus, the output is then within ±1 per value of the
+audiowaveform output (see Oracle tests).
 
 ## Development
 
 ```sh
 cargo build
-cargo test                             # tool-free tests
+cargo test                             # tests without external tools
 cargo test --all-features              # with AAC and Opus
 cargo test --no-default-features --features aac
 cargo test --test oracle -- --ignored  # comparison with audiowaveform
@@ -114,60 +136,70 @@ cargo deny check                       # dependency licenses and advisories
 cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac
 ```
 
-GitHub Actions runs all of these except the oracle tests on every push and pull
-request, with the tests also on Rust 1.88 and fuzzing limited to one minute per
-target. Tests and Clippy run on all four feature combinations so each stays
-clean. `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
-Fuzzing needs a nightly toolchain and
-[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Seed
-`fuzz/corpus/<target>` with small files, each prefixed with one byte that the
-target reads as options.
+GitHub Actions runs all of these commands, except the oracle tests, on each
+push and pull request. CI also runs the tests on Rust 1.88, and runs each fuzz
+target for one minute. Tests and Clippy run on all four feature combinations,
+so that each combination stays clean.
 
-CI and longer runs use `-rss_limit_mb=2048 -malloc_limit_mb=64`: memory use
-under the sanitizer grows past 512 MB without a leak, while any single
-allocation over 64 MB still fails. For runs longer than CI's minute, also skip
-`-fork`, whose temporary directories fill the disk.
+`cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
+Fuzzing needs a nightly toolchain and
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). To seed
+`fuzz/corpus/<target>`, use small files. Put one byte at the start of each
+file: the target reads this byte as options.
+
+CI and longer runs use `-rss_limit_mb=2048 -malloc_limit_mb=64`. The RSS limit
+is high because memory use under the sanitizer increases past 512 MB without a
+leak. The allocation limit still stops any single allocation of more than
+64 MB. For runs longer than one minute, do not use `-fork`: the temporary
+directories of `-fork` fill the disk.
 
 ### Oracle tests
 
-The oracle tests need `audiowaveform` and `ffmpeg` with libopus on `PATH`, or
-set `AUDIOWAVEFORM` and `FFMPEG`. They compare:
+The oracle tests need `audiowaveform`, and `ffmpeg` with libopus, on `PATH`.
+Alternatively, set `AUDIOWAVEFORM` and `FFMPEG` to the paths of the two
+programs. The tests compare:
 
-- raw PCM in 192 combinations of channels, length, zoom, bits, and mixdown or
-  split, byte for byte;
-- JSON output field by field;
-- Ogg Opus fixtures encoded by ffmpeg at test time: mono, stereo with an odd
-  length, a 16 kHz input, a 44.1 kHz input, patched `OpusHead` rate and gain,
-  and a clipping square wave;
-- the same fixtures remuxed to WebM, with known and unknown segment sizes:
-  exactly equal to this crate's Ogg output, and to audiowaveform's within the
-  Opus tolerance;
-- the same fixtures remuxed to fast-start and fragmented MP4: equal to this
-  crate's Ogg output up to FFmpeg's end trimming;
-- AAC encoded by FFmpeg as ADTS, fast-start MP4 and fragmented MP4, and by
-  Apple's `afconvert` when available, against FFmpeg's decoder.
+- raw PCM, byte for byte, in 192 combinations of channels, length, zoom, bits,
+  and mixdown or split;
+- JSON output, field by field;
+- Ogg Opus fixtures that ffmpeg encodes when the tests run: mono, stereo with
+  an odd length, 16 kHz input, 44.1 kHz input, a changed `OpusHead` rate and
+  gain, and a square wave that clips;
+- the same fixtures remuxed to WebM, with known and unknown segment sizes. The
+  output must be equal to the Ogg output of this crate, and to the
+  audiowaveform output within the Opus tolerance;
+- the same fixtures remuxed to fast-start and fragmented MP4. The output must
+  be equal to the Ogg output of this crate, except for the FFmpeg end trimming;
+- AAC that FFmpeg encodes as ADTS, fast-start MP4 and fragmented MP4, and AAC
+  from Apple `afconvert` if it is available. The reference is the FFmpeg
+  decoder.
 
-Opus comparisons allow ±1 per value. The `opus` crate bundles its own libopus
-build, whose float output differs in the last bit from Homebrew's. Decoding
-with Homebrew's libopus and this crate's conversion matches audiowaveform
-exactly.
+Opus comparisons accept a difference of ±1 per value. The `opus` crate bundles
+its own libopus build. The float output of this build is different in the last
+bit from the Homebrew libopus. With the Homebrew libopus and the conversion of
+this crate, the output is the same as the audiowaveform output.
 
 ## Limitations
 
-- Channel mapping family 1 (surround Opus) needs the multistream decoder.
-- Chained Ogg files: only the first link is decoded.
-- Ogg Skeleton: a file whose first page belongs to a Skeleton stream is
-  rejected, since only the stream of the first page is decoded.
-- Other formats (WAV, FLAC, MP3, Vorbis) through Symphonia, whose format
-  crates would each need an MPL-2.0 exception in `deny.toml`.
-- MP4 with its media data before the `moov` box, as FFmpeg and phones write by
-  default: it needs a `Read + Seek` constructor for files spooled to disk.
-- HE-AAC's SBR and parametric stereo layers, which Symphonia does not decode.
-- AAC in Matroska or WebM (Chrome can record it).
-- Matroska beyond what recorders write: compressed or encrypted tracks, and
-  files with several segments (only the first is decoded).
-- Several zoom levels in one pass.
-- A pure-Rust Opus decoder behind a feature flag.
+- Surround Opus (channel mapping family 1) is not supported: it needs the
+  multistream decoder.
+- For chained Ogg files, `OggOpusSource` decodes only the first link.
+- `OggOpusSource` rejects an Ogg file if its first page belongs to a Skeleton
+  stream, because the source decodes only the stream of the first page.
+- Other formats (WAV, FLAC, MP3, Vorbis) are not supported. Symphonia can
+  decode them, but each of its format crates needs an MPL-2.0 exception in
+  `deny.toml`.
+- `Mp4Source` rejects MP4 with the media data before the `moov` box. FFmpeg and
+  phones write this layout by default. To read this layout, the crate needs a
+  `Read + Seek` constructor for files spooled to disk.
+- Symphonia does not decode the SBR and parametric stereo layers of HE-AAC.
+- AAC in Matroska or WebM is not supported. Chrome can record this
+  combination.
+- `WebmOpusSource` skips compressed and encrypted tracks. For a file with
+  several segments, `WebmOpusSource` decodes only the first segment.
+- One run makes peaks at one zoom level only.
+- Opus decoding always needs libopus: there is no pure-Rust Opus decoder
+  option.
 
 ## License
 
@@ -178,12 +210,18 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
-Dependencies are limited to permissive licenses by `deny.toml`, except for
-Symphonia's crates under the optional `aac` feature. They are MPL-2.0, a
-file-level copyleft that covers Symphonia's own files only: a binary that
-includes them must say where their source is available, and changes to those
-files must be shared under MPL-2.0. The Opus decoder builds libopus
-(BSD-3-Clause) into the binary: distributing a binary means shipping its
-copyright notice, along with that of the `ogg` crate. audiowaveform (GPL-3.0)
-is only run as a separate program by the ignored oracle tests and is not part
-of the crate.
+`deny.toml` accepts only permissive licenses for dependencies. The exception is
+the Symphonia crates, which the optional `aac` feature uses. These crates have
+the MPL-2.0 license, a file-level copyleft that applies only to the Symphonia
+files:
+
+- A binary that includes these crates must tell where their source code is
+  available.
+- If you change these files, you must share the changes under MPL-2.0.
+
+The Opus decoder builds libopus (BSD-3-Clause) into the binary. If you
+distribute a binary, include the libopus copyright notice and the copyright
+notice of the `ogg` crate.
+
+audiowaveform (GPL-3.0) is not part of the crate. Only the ignored oracle tests
+use audiowaveform, and they run it as a separate program.
