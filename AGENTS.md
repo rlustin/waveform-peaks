@@ -16,6 +16,14 @@ Build, test, lint and format commands are in the Development section of
 - Do not describe what the code does — well-named identifiers already do that.
 - Keep comments short: one line is almost always enough.
 
+## README
+
+- Follow the writing rules of Simplified Technical English (ASD-STE100),
+  not its dictionary: at most 20 words per procedural sentence and 25 per
+  descriptive one, one instruction per sentence, active voice, one term
+  per concept, and no pronoun with an unclear referent.
+- Keep the standard license text in the License section verbatim.
+
 ## Dependencies
 
 - Adding a license to `deny.toml` is a licensing decision for the
