@@ -3,32 +3,7 @@
 Constant-memory generation of BBC audiowaveform-compatible peak data (`.dat`
 and JSON) from streamed audio.
 
-## Design
-
-```text
-PcmSource ──next_block()──▶ PeakBuilder ──point()──▶ PeakSink
-(OggOpusSource,             (min/max per             (DatWriter, JsonWriter,
- WebmOpusSource,             output channel)          MemorySink)
- Mp4Source,
- AdtsAacSource,
- RawPcmSource)
-```
-
-- **`PcmSource`** returns one decoded block at a time, borrowed from its own
-  buffer. `OggOpusSource` and `WebmOpusSource` read with plain `Read`, so an
-  upload body can be decoded as it arrives, and so do the MP4 and ADTS readers.
-  `WebmOpusSource` also reads Matroska, and browser `MediaRecorder` recordings,
-  whose clusters have no size. `Mp4Source` reads AAC or Opus from fragmented
-  MP4, as Safari and Chrome record, and from MP4 with the `moov` box first.
-- **`PeakBuilder`** keeps one `(min, max)` accumulator per output channel.
-- **`PeakSink`** receives each point as it completes. `DatWriter` patches the
-  length field at the end (needs `Seek`). `JsonWriter` writes `length` after
-  `data`, so it needs no `Seek`.
-- **`generate`** connects the three and enforces `Limits` (channel count,
-  duration) as blocks arrive.
-
-Points reach the output as they complete, so a failed run leaves a partial
-file. Write to a temporary path and rename it on success.
+## Usage
 
 ```rust
 let mut source = OggOpusSource::new(File::open("upload.opus")?)?;
@@ -36,9 +11,33 @@ let output = File::create("upload.dat")?;
 generate(&mut source, &Options::default(), &Limits::default(), DatWriter::new(output))?;
 ```
 
+`generate` enforces `Limits` (channel count, duration) as blocks arrive.
+Points reach the output as they complete, so a failed run leaves a partial
+file. Write to a temporary path and rename it on success. `DatWriter` patches
+the length field at the end (needs `Seek`). `JsonWriter` writes `length` after
+`data`, so it needs no `Seek`.
+
 The API is synchronous because decoding is CPU-bound. In an async server, run
 `generate` with `spawn_blocking` and read the upload through `tokio-util`'s
 `SyncIoBridge`; the crate docs have an example.
+
+## Supported input
+
+| Source | Container | Codec | Feature |
+|---|---|---|---|
+| `OggOpusSource` | Ogg | Opus | `opus` (default) |
+| `WebmOpusSource` | WebM, Matroska | Opus | `opus` (default) |
+| `Mp4Source` | MP4 | Opus | `opus` (default) |
+| `Mp4Source` | MP4 | AAC-LC | `aac` |
+| `AdtsAacSource` | ADTS | AAC-LC | `aac` |
+| `RawPcmSource` | none | Interleaved signed 16-bit little-endian PCM | none |
+
+Every source reads with plain `Read`, so an upload body can be decoded as it
+arrives. `WebmOpusSource` also reads browser `MediaRecorder` recordings, whose
+clusters have no size. `Mp4Source` reads fragmented MP4, as Safari and Chrome
+record, and MP4 with the `moov` box first.
+
+## Memory use
 
 On a one-hour stereo Opus file, in Ogg or WebM, peak memory is 2 MB at zoom 256
 and at zoom 32, against 15 MB and 64 MB for audiowaveform 1.11.1, which keeps
