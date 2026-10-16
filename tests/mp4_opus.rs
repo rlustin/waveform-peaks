@@ -233,9 +233,26 @@ fn aac_needs_its_feature() {
     let track = Mp4Track::audio(&[0x12, 0x08], 1, 44_100, &[vec![0; 10]], 1);
     let result = mp4(faststart_mp4(&[track], 1000, &[], &[]));
     assert!(
-        matches!(&result, Err(Error::Unsupported(m)) if m.contains("aac feature")),
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("without the aac")),
         "{result:?}"
     );
+}
+
+#[cfg(not(feature = "mp3"))]
+#[test]
+fn mpeg_audio_needs_its_feature() {
+    for entry in [
+        audio_sample_entry(b"mp4a", 1, 44_100, &esds(0x6B, &[])),
+        audio_sample_entry(b".mp3", 1, 44_100, &[]),
+    ] {
+        let mut track = Mp4Track::audio(&[], 1, 44_100, &[vec![0; 10]], 1);
+        track.sample_entry = entry;
+        let result = mp4(faststart_mp4(&[track], 1000, &[], &[]));
+        assert!(
+            matches!(&result, Err(Error::Unsupported(m)) if m.contains("mp3 feature")),
+            "{result:?}"
+        );
+    }
 }
 
 /// A track that cannot be decoded is passed over for the next one.
@@ -249,9 +266,9 @@ fn passes_over_opus_it_cannot_decode() {
     assert_same(&mp4(file).unwrap(), &ogg_reference(END_TRIM));
 }
 
-/// Without the feature, an `mp4a` track is not parsed, so its malformed
+/// Without the features, an `mp4a` track is not parsed, so its malformed
 /// `esds` box does not reject the file.
-#[cfg(not(feature = "aac"))]
+#[cfg(not(any(feature = "aac", feature = "mp3")))]
 #[test]
 fn passes_over_mp4a_without_its_feature() {
     let mut aac = Mp4Track::audio(&[0x12, 0x08], 1, 44_100, &[vec![0; 10]], 1);

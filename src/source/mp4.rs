@@ -1,5 +1,5 @@
-//! MP4 (ISO base media file format), with AAC through Symphonia and Opus
-//! through libopus.
+//! MP4 (ISO base media file format), with AAC and MPEG audio through Symphonia
+//! and Opus through libopus.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,6 +9,8 @@ use std::sync::{Mutex, PoisonError};
 
 #[cfg(feature = "aac")]
 use super::aac::AacDecoder;
+#[cfg(feature = "mp3")]
+use super::mpa::{self, MpaDecoder};
 #[cfg(feature = "opus")]
 use super::opus::{End, OpusDecoder, OpusHead, OpusOptions, to_decode_rate};
 use super::{CountingReader, invalid};
@@ -22,8 +24,8 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024;
 /// handful.
 const MAX_TRACK_DEFAULTS: usize = 1024;
 
-/// Largest sample read. A stereo AAC-LC frame is under 2 KiB, and an Opus
-/// packet at most 48 frames of 1,275 bytes.
+/// Largest sample read. A stereo AAC-LC frame is under 2 KiB, an MPEG audio
+/// frame under 3 KiB, and an Opus packet at most 48 frames of 1,275 bytes.
 const MAX_SAMPLE_BYTES: usize = 64 * 1024;
 
 /// Settings for [`Mp4Source`].
@@ -53,11 +55,12 @@ impl Default for Mp4Options {
     }
 }
 
-/// Streams PCM out of the first AAC or Opus track of an MP4 file (`.m4a`,
-/// `.mp4`), such as a Safari or Chrome `MediaRecorder` recording. AAC needs
-/// the `aac` feature and Opus the `opus` feature. Audio tracks that cannot be
-/// decoded, for want of their feature or with a profile, channel layout or
-/// channel mapping family this crate does not decode, are passed over.
+/// Streams PCM out of the first AAC, Opus or MPEG audio (MP1, MP2, MP3) track
+/// of an MP4 file (`.m4a`, `.mp4`), such as a Safari or Chrome `MediaRecorder`
+/// recording. AAC needs the `aac` feature, Opus the `opus` feature and MPEG
+/// audio the `mp3` feature. Audio tracks that cannot be decoded, for want of
+/// their feature or with a profile, channel layout or channel mapping family
+/// this crate does not decode, are passed over.
 ///
 /// Reads with plain `Read`, so an upload body can be decoded as it arrives.
 /// Reads are buffered internally. This needs the `moov` box before the media
@@ -75,17 +78,24 @@ impl Default for Mp4Options {
 ///
 /// Trims the encoder priming and padding given by the track's edit list.
 /// Without one, AAC is trimmed by the `iTunSMPB` tag Apple encoders write, and
-/// Opus by the pre-skip of its `dOps` box. Handles AAC-LC, and Opus with
-/// channel mapping family 0, in mono and stereo; a file with no other audio
-/// track is [`Error::Unsupported`]. Samples must be stored in file order, as
-/// muxers write them.
+/// Opus by the pre-skip of its `dOps` box. Handles AAC-LC, Opus with channel
+/// mapping family 0, and MPEG audio, in mono and stereo; a file with no other
+/// audio track is [`Error::Unsupported`]. MPEG audio samples must each hold one
+/// frame, and samples must be stored in file order, as muxers write them.
 ///
 /// A file cut between boxes is not an error: the samples present are decoded.
 /// A cut inside a box is [`Error::InvalidInput`]. Decoding stops at the end of
 /// the edit list, so what follows is not read.
 pub struct Mp4Source<R: Read> {
-    reader: BoxReader<R>,
+    media: Media<R>,
     decoder: Decoder,
+    /// Whether `media.frame` holds a sample read but not decoded yet.
+    pending: bool,
+}
+
+/// Reads the samples of the chosen track out of the media data.
+struct Media<R: Read> {
+    reader: BoxReader<R>,
     track_id: u32,
     defaults: HashMap<u32, TrackDefaults>,
     max_table_bytes: usize,
@@ -123,9 +133,11 @@ impl<R: Read> Mp4Source<R> {
     ///   boxes are malformed, including a `dOps` box with channel mapping
     ///   family 0 and more than two channels.
     /// - [`Error::Unsupported`] when the media data comes before the `moov`
-    ///   box, or when no audio track can be decoded: none is AAC or Opus with
-    ///   its feature enabled, or each is encrypted, AAC other than AAC-LC in
-    ///   mono or stereo, or Opus with a channel mapping family other than 0.
+    ///   box, or when no audio track can be decoded: none is AAC, Opus or MPEG
+    ///   audio with its feature enabled, or each is encrypted, AAC other than
+    ///   AAC-LC in mono or stereo, or Opus with a channel mapping family other
+    ///   than 0; or when the first MPEG audio sample is not one frame, or has
+    ///   a free-format bit rate.
     /// - [`Error::LimitExceeded`] when the sample tables pass
     ///   [`Mp4Options::max_table_bytes`].
     pub fn with_options(reader: R, options: Mp4Options) -> Result<Self, Error> {
@@ -162,7 +174,21 @@ impl<R: Read> Mp4Source<R> {
                 .edit
                 .map(|edit| edit.range(track.timescale, movie.timescale, rate))
         };
-        let decoder = match track.config {
+        // Only an MPEG audio track reads from the media here.
+        #[cfg_attr(not(feature = "mp3"), allow(unused_mut))]
+        let mut media = Media {
+            reader,
+            track_id: track.id,
+            defaults: movie.defaults,
+            max_table_bytes: options.max_table_bytes,
+            table: track.table,
+            fragment: Vec::new(),
+            next_fragment_sample: 0,
+            mdat: None,
+            frame: Vec::new(),
+            finished: false,
+        };
+        let (decoder, pending) = match track.config {
             #[cfg(feature = "aac")]
             Config::Aac(mut decoder) => {
                 let (start, end) = edit_range(decoder.sample_rate())
@@ -175,7 +201,7 @@ impl<R: Read> Mp4Source<R> {
                     })
                     .unwrap_or((0, None));
                 decoder.trim(start, end);
-                Decoder::Aac(decoder)
+                (Decoder::Aac(decoder), false)
             }
             #[cfg(feature = "opus")]
             Config::Opus(head) => {
@@ -184,28 +210,74 @@ impl<R: Read> Mp4Source<R> {
                 let (pre_skip, end) = edit_range(48_000).unwrap_or((head.pre_skip as u64, None));
                 let decoder = OpusDecoder::new(&head, pre_skip, &options.opus)?;
                 let sample_rate = decoder.sample_rate();
-                Decoder::Opus {
+                let decoder = Decoder::Opus {
                     sample_rate,
                     channels: decoder.channels(),
                     end: end.map(|end| to_decode_rate(end, sample_rate)),
                     decoder: Mutex::new(decoder),
+                };
+                (decoder, false)
+            }
+            // The rate and channels are in the frame headers, so the first
+            // sample is read now and decoded with the others.
+            #[cfg(feature = "mp3")]
+            Config::Mpa {
+                sample_rate,
+                channels,
+            } => {
+                if !media.next_frame()? {
+                    if sample_rate == 0 || channels == 0 {
+                        return Err(invalid("empty MPEG audio track without a rate"));
+                    }
+                    let empty = Decoder::Empty {
+                        sample_rate,
+                        channels,
+                    };
+                    return Ok(Mp4Source {
+                        media,
+                        decoder: empty,
+                        pending: false,
+                    });
                 }
+                // Old QuickTime files count MPEG audio in samples of one byte.
+                let header = media.frame.first_chunk().ok_or_else(|| {
+                    Error::Unsupported("MPEG audio samples shorter than a frame".into())
+                })?;
+                let header = mpa::Header::parse(*header)?;
+                header.check_length(media.frame.len())?;
+                let mut decoder = MpaDecoder::new(header)?;
+                let (start, end) = edit_range(decoder.sample_rate()).unwrap_or((0, None));
+                decoder.trim(start, end);
+                (Decoder::Mpa(Box::new(decoder)), true)
             }
         };
 
         Ok(Mp4Source {
-            reader,
+            media,
             decoder,
-            track_id: track.id,
-            defaults: movie.defaults,
-            max_table_bytes: options.max_table_bytes,
-            table: track.table,
-            fragment: Vec::new(),
-            next_fragment_sample: 0,
-            mdat: None,
-            frame: Vec::new(),
-            finished: false,
+            pending,
         })
+    }
+}
+
+impl<R: Read> Media<R> {
+    /// Reads the next sample that is not empty into `frame`. Returns false at
+    /// the end of the input.
+    fn next_frame(&mut self) -> Result<bool, Error> {
+        while !self.finished {
+            let Some((offset, size)) = self.next_sample()? else {
+                self.finished = true;
+                break;
+            };
+            if size == 0 {
+                continue;
+            }
+            if self.read_sample(offset, size)? {
+                return Ok(true);
+            }
+            self.finished = true;
+        }
+        Ok(false)
     }
 
     /// The offset and size of the next sample of the audio track, reading
@@ -302,8 +374,8 @@ impl<R: Read> fmt::Debug for Mp4Source<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Mp4Source")
             .field("decoder", &self.decoder)
-            .field("track_id", &self.track_id)
-            .field("finished", &self.finished)
+            .field("track_id", &self.media.track_id)
+            .field("finished", &self.media.finished)
             .finish_non_exhaustive()
     }
 }
@@ -318,19 +390,12 @@ impl<R: Read> PcmSource for Mp4Source<R> {
     }
 
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
-        while !self.finished && !self.decoder.past_end() {
-            let Some((offset, size)) = self.next_sample()? else {
-                self.finished = true;
-                break;
-            };
-            if size == 0 {
-                continue;
-            }
-            if !self.read_sample(offset, size)? {
-                self.finished = true;
+        while !self.decoder.past_end() {
+            if !self.pending && !self.media.next_frame()? {
                 break;
             }
-            if self.decoder.decode(&self.frame)? {
+            self.pending = false;
+            if self.decoder.decode(&self.media.frame)? {
                 return Ok(Some(self.decoder.output()));
             }
         }
@@ -354,6 +419,11 @@ enum Decoder {
         /// source `Sync`, which libopus's decoder is not.
         decoder: Mutex<OpusDecoder>,
     },
+    #[cfg(feature = "mp3")]
+    Mpa(Box<MpaDecoder>),
+    /// An MPEG audio track with no samples, described by its sample entry.
+    #[cfg(feature = "mp3")]
+    Empty { sample_rate: u32, channels: u16 },
 }
 
 impl Decoder {
@@ -363,6 +433,10 @@ impl Decoder {
             Decoder::Aac(decoder) => decoder.sample_rate(),
             #[cfg(feature = "opus")]
             Decoder::Opus { sample_rate, .. } => *sample_rate,
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.sample_rate(),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { sample_rate, .. } => *sample_rate,
         }
     }
 
@@ -372,6 +446,10 @@ impl Decoder {
             Decoder::Aac(decoder) => decoder.channels(),
             #[cfg(feature = "opus")]
             Decoder::Opus { channels, .. } => *channels,
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.channels(),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { channels, .. } => *channels,
         }
     }
 
@@ -384,6 +462,10 @@ impl Decoder {
             Decoder::Opus { decoder, end, .. } => {
                 end.is_some_and(|end| opus(decoder).position() >= end)
             }
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.past_end(),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { .. } => true,
         }
     }
 
@@ -397,6 +479,10 @@ impl Decoder {
             Decoder::Opus { decoder, end, .. } => {
                 opus(decoder).decode(sample, end.map_or(End::Open, End::At))
             }
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.decode(sample),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { .. } => Ok(false),
         }
     }
 
@@ -406,6 +492,10 @@ impl Decoder {
             Decoder::Aac(decoder) => decoder.output(),
             #[cfg(feature = "opus")]
             Decoder::Opus { decoder, .. } => opus(decoder).output(),
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.output(),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { .. } => &[],
         }
     }
 }
@@ -441,6 +531,10 @@ enum Config {
     Aac(Box<AacDecoder>),
     #[cfg(feature = "opus")]
     Opus(OpusHead),
+    /// Configured from the first frame. The sample entry's rate and channels
+    /// serve only for a track without samples.
+    #[cfg(feature = "mp3")]
+    Mpa { sample_rate: u32, channels: u16 },
 }
 
 /// The first edit of an edit list that shows media.
@@ -712,14 +806,22 @@ fn sample_description(body: &[u8]) -> Result<Codec, Error> {
     // Codecs this build does not decode are passed over unparsed, so that a
     // malformed track of theirs cannot reject the file.
     let parse: fn(&[u8]) -> Result<Codec, Error> = match kind {
-        #[cfg(feature = "aac")]
+        #[cfg(any(feature = "aac", feature = "mp3"))]
         b"mp4a" => mp4a_config,
         #[cfg(feature = "opus")]
         b"Opus" => opus_config,
-        #[cfg(not(feature = "aac"))]
-        b"mp4a" => return Ok(Codec::Other("mp4a, without the aac feature".into())),
+        // QuickTime's MPEG audio sample entries, with no decoder
+        // configuration.
+        #[cfg(feature = "mp3")]
+        b".mp3" | b".mp2" => |_| Ok(Codec::Decodable(MPA)),
+        #[cfg(not(any(feature = "aac", feature = "mp3")))]
+        b"mp4a" => return Ok(Codec::Other("mp4a, without the aac or mp3 feature".into())),
         #[cfg(not(feature = "opus"))]
         b"Opus" => return Ok(Codec::Other("Opus, without the opus feature".into())),
+        #[cfg(not(feature = "mp3"))]
+        b".mp3" | b".mp2" => {
+            return Ok(Codec::Other("MPEG audio, without the mp3 feature".into()));
+        }
         b"enca" => return Ok(Codec::Encrypted),
         other => return Ok(Codec::Other(String::from_utf8_lossy(other).into_owned())),
     };
@@ -733,8 +835,26 @@ fn sample_description(body: &[u8]) -> Result<Codec, Error> {
     let children = entry
         .get(28 + extra..)
         .ok_or_else(|| invalid("truncated sample entry"))?;
-    parse(children)
+    #[cfg_attr(not(feature = "mp3"), allow(unused_mut))]
+    let mut codec = parse(children)?;
+    #[cfg(feature = "mp3")]
+    if let Codec::Decodable(Config::Mpa {
+        sample_rate,
+        channels,
+    }) = &mut codec
+    {
+        *channels = be_u16(entry, 16)?;
+        *sample_rate = be_u32(entry, 24)? >> 16;
+    }
+    Ok(codec)
 }
+
+/// An MPEG audio track, whose sample entry fields are filled in after.
+#[cfg(feature = "mp3")]
+const MPA: Config = Config::Mpa {
+    sample_rate: 0,
+    channels: 0,
+};
 
 /// Reads the `dOps` box of an `Opus` sample entry.
 #[cfg(feature = "opus")]
@@ -749,12 +869,12 @@ fn opus_config(children: &[u8]) -> Result<Codec, Error> {
 }
 
 /// Reads the `esds` box of an `mp4a` sample entry.
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "aac", feature = "mp3"))]
 fn mp4a_config(children: &[u8]) -> Result<Codec, Error> {
     let esds = find_child(children, b"esds")
         .or_else(|| find_child(children, b"wave").and_then(|wave| find_child(wave, b"esds")))
         .ok_or_else(|| invalid("mp4a sample entry without an esds box"))?;
-    audio_specific_config(esds)
+    esds_config(esds)
 }
 
 /// The body of the first child box of `kind` in `boxes`.
@@ -772,9 +892,9 @@ fn find_child<'a>(mut boxes: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     None
 }
 
-/// Extracts the `AudioSpecificConfig` from an `esds` body.
-#[cfg(feature = "aac")]
-fn audio_specific_config(esds: &[u8]) -> Result<Codec, Error> {
+/// Reads the decoder configuration of an `esds` body.
+#[cfg(any(feature = "aac", feature = "mp3"))]
+fn esds_config(esds: &[u8]) -> Result<Codec, Error> {
     let bad = || invalid("malformed esds box");
     // Version and flags, then the ES descriptor.
     let mut data = esds.get(4..).ok_or_else(bad)?;
@@ -799,24 +919,34 @@ fn audio_specific_config(esds: &[u8]) -> Result<Codec, Error> {
         return Err(bad());
     }
     let object_type = *config.first().ok_or_else(bad)?;
-    // MPEG-4 audio, and the MPEG-2 AAC profiles.
-    if !matches!(object_type, 0x40 | 0x66..=0x68) {
-        return Ok(Codec::Other(format!("object type {object_type:#04x}")));
-    }
-    let mut specific = config.get(13..).ok_or_else(bad)?;
-    let (tag, asc) = descriptor(&mut specific).ok_or_else(bad)?;
-    if tag != 0x05 {
-        return Err(bad());
-    }
-    match AacDecoder::new(asc) {
-        Ok(decoder) => Ok(Codec::Decodable(Config::Aac(Box::new(decoder)))),
-        Err(Error::Unsupported(reason)) => Ok(Codec::Other(reason)),
-        Err(err) => Err(err),
+    match object_type {
+        // MPEG-4 audio, and the MPEG-2 AAC profiles.
+        #[cfg(feature = "aac")]
+        0x40 | 0x66..=0x68 => {
+            let mut specific = config.get(13..).ok_or_else(bad)?;
+            let (tag, asc) = descriptor(&mut specific).ok_or_else(bad)?;
+            if tag != 0x05 {
+                return Err(bad());
+            }
+            match AacDecoder::new(asc) {
+                Ok(decoder) => Ok(Codec::Decodable(Config::Aac(Box::new(decoder)))),
+                Err(Error::Unsupported(reason)) => Ok(Codec::Other(reason)),
+                Err(err) => Err(err),
+            }
+        }
+        #[cfg(not(feature = "aac"))]
+        0x40 | 0x66..=0x68 => Ok(Codec::Other("AAC, without the aac feature".into())),
+        // MPEG-2 and MPEG-1 audio.
+        #[cfg(feature = "mp3")]
+        0x69 | 0x6B => Ok(Codec::Decodable(MPA)),
+        #[cfg(not(feature = "mp3"))]
+        0x69 | 0x6B => Ok(Codec::Other("MPEG audio, without the mp3 feature".into())),
+        _ => Ok(Codec::Other(format!("object type {object_type:#04x}"))),
     }
 }
 
 /// Reads an MPEG-4 descriptor: a tag and a size of up to four 7-bit bytes.
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "aac", feature = "mp3"))]
 fn descriptor<'a>(data: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
     let (&tag, mut rest) = data.split_first()?;
     let mut size = 0usize;

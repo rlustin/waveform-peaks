@@ -9,8 +9,13 @@ all-features = true
 # decision before being added here.
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause"]
 
-# Symphonia's AAC decoder, behind the optional `aac` feature. MPL-2.0 covers
-# Symphonia's own files only, so this crate keeps its license.
+# Symphonia's AAC and MPEG audio decoders, behind the optional `aac` and `mp3`
+# features. MPL-2.0 covers Symphonia's own files only, so this crate keeps its
+# license.
+[[licenses.exceptions]]
+crate = "symphonia-bundle-mp3"
+allow = ["MPL-2.0"]
+
 [[licenses.exceptions]]
 crate = "symphonia-codec-aac"
 allow = ["MPL-2.0"]

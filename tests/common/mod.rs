@@ -444,6 +444,33 @@ pub fn adts_frames(adts: &[u8]) -> ([u8; 2], Vec<Vec<u8>>) {
     (config, frames)
 }
 
+/// Splits an MPEG-1 layer II or III stream into its frames, headers included.
+pub fn mpa_frames(stream: &[u8]) -> Vec<Vec<u8>> {
+    const LAYER_2: [u32; 15] = [
+        0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+    ];
+    const LAYER_3: [u32; 15] = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    let mut frames = Vec::new();
+    let mut at = 0;
+    while at < stream.len() {
+        let header = &stream[at..];
+        assert_eq!(header[1] & 0xF8, 0xF8, "MPEG-1 frame at {at}");
+        let table = if header[1] & 0x06 == 0x02 {
+            LAYER_3
+        } else {
+            LAYER_2
+        };
+        let bit_rate = table[(header[2] >> 4) as usize] * 1000;
+        let rate = [44_100, 48_000, 32_000][(header[2] >> 2 & 3) as usize];
+        let len = (144 * bit_rate / rate) as usize + (header[2] >> 1 & 1) as usize;
+        frames.push(header[..len].to_vec());
+        at += len;
+    }
+    frames
+}
+
 pub fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = (8 + body.len() as u32).to_be_bytes().to_vec();
     out.extend(kind);

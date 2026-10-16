@@ -1,5 +1,6 @@
 //! Generates a `.dat` or `.json` waveform from an Opus file in Ogg, WebM or
-//! MP4, or with the `aac` feature an MP4 or ADTS AAC file.
+//! MP4, with the `aac` feature an MP4 or ADTS AAC file, or with the `mp3`
+//! feature an MP4 or MPEG audio (MP1, MP2, MP3) file.
 //!
 //! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split]
 
@@ -52,8 +53,13 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     let ogg = magic.starts_with(b"OggS");
     let webm = magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]);
     let mp4 = magic.get(4..8) == Some(b"ftyp");
-    let adts =
-        magic.starts_with(b"ID3") || matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0);
+    // ADTS headers have the layer bits MPEG audio reserves. Past an ID3 tag,
+    // only the extension tells them apart.
+    let tagged = magic.starts_with(b"ID3");
+    let adts = matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0)
+        || tagged && path.ends_with(".aac");
+    let mpeg_audio = matches!(magic, [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0)
+        || tagged && !adts;
     if ogg {
         return Ok(Box::new(OggOpusSource::new(input)?));
     }
@@ -70,7 +76,18 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     if adts {
         return Err(Error::Unsupported("AAC needs the aac feature".into()));
     }
-    Err(Error::Unsupported("not Ogg, WebM, MP4 or ADTS".into()))
+    #[cfg(feature = "mp3")]
+    if mpeg_audio {
+        return Ok(Box::new(waveform_peaks::MpegAudioSource::new(input)?));
+    }
+    if mpeg_audio {
+        return Err(Error::Unsupported(
+            "MPEG audio needs the mp3 feature".into(),
+        ));
+    }
+    Err(Error::Unsupported(
+        "not Ogg, WebM, MP4, ADTS or MPEG audio".into(),
+    ))
 }
 
 fn run(input: &str, output: &str, options: &Options) -> Result<(), Error> {
