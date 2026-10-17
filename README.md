@@ -44,7 +44,9 @@ while the upload continues.
 
 `WebmOpusSource` also reads browser `MediaRecorder` recordings, which have
 clusters of unknown size. `Mp4Source` reads fragmented MP4, which Safari and
-Chrome record, and MP4 that has the `moov` box first.
+Chrome record, and MP4 that has the `moov` box first. The tests include real
+recordings from Chrome 155 and Safari 27: Opus in WebM, and Opus and AAC in
+MP4.
 
 ## Memory use
 
