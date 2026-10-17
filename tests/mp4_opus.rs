@@ -57,6 +57,13 @@ fn matches_ogg_with_the_same_packets() {
 }
 
 #[test]
+fn seekable_reads_media_data_before_moov() {
+    let file = media_first_mp4(&[trimmed_track(7)], 48_000, &[]);
+    let decoded = samples(Mp4Source::new_seekable(Cursor::new(file)).unwrap()).unwrap();
+    assert_same(&decoded, &ogg_reference(END_TRIM));
+}
+
+#[test]
 fn reads_chrome_recordings() {
     let source = Mp4Source::new(Cursor::new(CHROME)).unwrap();
     assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));

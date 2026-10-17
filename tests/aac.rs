@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 use common::*;
 use waveform_peaks::{AdtsAacSource, Error, Mp4Options, Mp4Source, PcmSource};
@@ -256,20 +256,123 @@ fn reads_quicktime_files() {
 }
 
 #[test]
-fn media_data_before_moov_is_unsupported() {
-    let file = faststart_mp4(&[mono_track(10)], 1000, &[], &[]);
-    // Move the mdat box (the end of the file) in front of moov.
-    let mdat_start = file.windows(4).rposition(|w| w == b"mdat").unwrap() - 4;
-    let ftyp_len = 8 + 20;
-    let reordered = [
-        &file[..ftyp_len],
-        &file[mdat_start..],
-        &file[ftyp_len..mdat_start],
-    ]
-    .concat();
-    let result = mp4(reordered);
+fn media_data_before_moov_needs_seek() {
+    let file = media_first_mp4(&[mono_track(10)], 1000, &[]);
+    let mdat_start = file.windows(4).position(|w| w == b"mdat").unwrap() - 4;
+    let result = mp4(file.clone());
     assert!(
-        matches!(&result, Err(Error::Unsupported(m)) if m.contains("moov")),
+        matches!(&result, Err(Error::Unsupported(m)) if m.contains("new_seekable")),
+        "{result:?}"
+    );
+    // Seeking would not help: no moov box can follow.
+    let mut open_ended = file;
+    open_ended[mdat_start..mdat_start + 4].copy_from_slice(&0u32.to_be_bytes());
+    let result = mp4(open_ended);
+    assert!(
+        matches!(&result, Err(Error::InvalidInput(m)) if m.contains("open-ended")),
+        "{result:?}"
+    );
+}
+
+fn seekable(bytes: Vec<u8>) -> Result<Vec<i16>, Error> {
+    samples(Mp4Source::new_seekable(Cursor::new(bytes))?)
+}
+
+#[test]
+fn seekable_reads_media_data_before_moov() {
+    let video = Mp4Track {
+        id: 2,
+        handler: *b"vide",
+        sample_entry: mp4_box(b"avc1", &[0; 78]),
+        timescale: 90_000,
+        edit: None,
+        chunks: vec![vec![vec![0xEE; 50_000]]; 8],
+        wide_offsets: false,
+        quicktime: false,
+    };
+    let file = media_first_mp4(&[video, mono_track(6)], 1000, &[]);
+    assert_same(&seekable(file).unwrap(), &adts(MONO));
+
+    // The edit list and the gapless tag are in the moov box, read first.
+    let mut track = mono_track(10);
+    track.edit = Some((1000, PRIMING as i64));
+    let file = media_first_mp4(&[track], 1000, &[]);
+    assert_eq!(seekable(file).unwrap().len() as u64, 44_100);
+    let udta = itunsmpb_udta(PRIMING as u32, 0, MONO_LENGTH, false);
+    let file = media_first_mp4(&[mono_track(10)], 1000, &udta);
+    assert_eq!(seekable(file).unwrap().len() as u64, MONO_LENGTH);
+}
+
+#[test]
+fn seekable_reads_from_the_current_position() {
+    let prefix = vec![0xAB; 1000];
+    let file = [&prefix[..], &media_first_mp4(&[mono_track(10)], 1000, &[])].concat();
+    let mut reader = Cursor::new(file);
+    reader.seek(SeekFrom::Start(prefix.len() as u64)).unwrap();
+    let decoded = samples(Mp4Source::new_seekable(reader).unwrap()).unwrap();
+    assert_same(&decoded, &adts(MONO));
+}
+
+#[test]
+fn seekable_reads_streamable_layouts() {
+    let file = faststart_mp4(&[mono_track(10)], 1000, &[], &[]);
+    assert_same(&seekable(file).unwrap(), &adts(MONO));
+    let (_, frames) = adts_frames(MONO);
+    let fragments: Vec<Vec<Vec<u8>>> = frames.chunks(10).map(<[_]>::to_vec).collect();
+    let file = fragmented_mp4(&mono_track(1), &fragments, false);
+    assert_same(&seekable(file).unwrap(), &adts(MONO));
+    assert_same(
+        &seekable(CHROME.to_vec()).unwrap(),
+        &mp4(CHROME.to_vec()).unwrap(),
+    );
+}
+
+#[test]
+fn seekable_rejects_media_data_without_moov() {
+    let file = media_first_mp4(&[mono_track(10)], 1000, &[]);
+    let moov_start = file.windows(4).rposition(|w| w == b"moov").unwrap() - 4;
+    let mdat_start = file.windows(4).position(|w| w == b"mdat").unwrap() - 4;
+    let mut open_ended = file[..moov_start].to_vec();
+    open_ended[mdat_start..mdat_start + 4].copy_from_slice(&0u32.to_be_bytes());
+    let large_mdat = |size: u64| {
+        let mut large = file[..mdat_start].to_vec();
+        large.extend(1u32.to_be_bytes());
+        large.extend(b"mdat");
+        large.extend(size.to_be_bytes());
+        large.extend(&file[mdat_start + 8..]);
+        large
+    };
+    for (name, file) in [
+        ("cut before moov", file[..moov_start].to_vec()),
+        ("open-ended mdat", open_ended),
+        ("mdat past the end", large_mdat(1 << 63)),
+        ("mdat past the seek range", large_mdat((1 << 63) + 1000)),
+    ] {
+        let result = seekable(file);
+        assert!(
+            matches!(result, Err(Error::InvalidInput(_))),
+            "{name}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn seekable_reads_media_data_after_moov_too() {
+    for rounds_after in [1, 3] {
+        let file = media_around_moov(&[mono_track(10)], 1000, &[], rounds_after);
+        assert_eq!(file.windows(4).filter(|w| w == b"mdat").count(), 2);
+        assert_same(&seekable(file).unwrap(), &adts(MONO));
+    }
+}
+
+#[test]
+fn seekable_rejects_samples_past_a_second_moov_box() {
+    let mut file = media_around_moov(&[mono_track(10)], 1000, &[], 1);
+    let kind = file.windows(4).rposition(|w| w == b"mdat").unwrap();
+    file[kind..kind + 4].copy_from_slice(b"moov");
+    let result = seekable(file);
+    assert!(
+        matches!(&result, Err(Error::InvalidInput(m)) if m.contains("outside")),
         "{result:?}"
     );
 }

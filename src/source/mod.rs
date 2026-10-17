@@ -21,7 +21,7 @@ mod webm_opus;
 
 use std::fmt;
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Seek};
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "aac")]
@@ -241,6 +241,20 @@ impl<R: Read> CountingReader<R> {
 
     pub(crate) fn skip_to_end(&mut self) -> Result<(), Error> {
         self.position += io::copy(&mut self.reader, &mut io::sink())?;
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
+impl<R: Read + Seek> CountingReader<R> {
+    /// Moves to `position`, counted like [`position`](Self::position). Seeks
+    /// relative to the current offset, so the input may start anywhere in
+    /// the underlying reader.
+    pub(crate) fn seek_to(&mut self, position: u64) -> Result<(), Error> {
+        let offset = i64::try_from(position as i128 - self.position as i128)
+            .map_err(|_| invalid("offset out of range"))?;
+        self.reader.seek_relative(offset)?;
+        self.position = position;
         Ok(())
     }
 }
