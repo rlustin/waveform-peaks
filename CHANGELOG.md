@@ -4,15 +4,15 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.3] - 2026-10-15
+## [0.1.3] - 2026-10-16
 
 ### Added
 
 - MP1, MP2 and MP3 input through Symphonia, behind the new `mp3` feature.
-  `MpegAudioSource` reads MPEG audio streams (`.mp3`, `.mp2`) and trims them
-  as audiowaveform does: it skips a Xing or Info tag frame, and trims the
-  LAME encoder delay. `Mp4Source` reads MPEG audio tracks, including the
-  QuickTime `.mp3` and `.mp2` sample entries.
+  `MpegAudioSource` reads MPEG audio streams (`.mp3`, `.mp2`) as audiowaveform
+  does: it skips a Xing or Info tag frame, trims the LAME encoder delay, clips
+  at -32767, and drops an incomplete last frame. `Mp4Source` reads MPEG audio
+  tracks, including the QuickTime `.mp3` and `.mp2` sample entries.
 
 ## [0.1.2] - 2026-10-14
 
