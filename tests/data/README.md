@@ -14,6 +14,13 @@ Short files generated for these tests, with no third-party audio:
   `OscillatorNode` recorded by headless Chrome 155's `MediaRecorder`, as
   `audio/mp4;codecs=opus` and `audio/mp4;codecs=mp4a.40.2`, with a 250 ms
   timeslice.
+- `chrome-opus-stereo.webm`: the same tone recorded by headless Chrome 155 as
+  `audio/webm;codecs=opus`.
+- `safari-aac-stereo.mp4`, `safari-opus-stereo.mp4` and
+  `safari-opus-stereo.webm`: the same tone recorded by Safari 27.0.1 through
+  `safaridriver`, as `audio/mp4;codecs=mp4a.40.2`, `audio/mp4;codecs=opus`
+  and `audio/webm;codecs=opus`. The two Opus files use an
+  `audioBitsPerSecond` of 32,000 to keep them small.
 
 Similar files can be made with:
 

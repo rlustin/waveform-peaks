@@ -9,6 +9,13 @@ use std::io::Cursor;
 use common::*;
 use waveform_peaks::{Error, OggOpusSource, OpusOptions, PcmSource, WebmOpusSource};
 
+/// Recorded by Chrome 155's `MediaRecorder`: segment and clusters of unknown
+/// size, no `CodecDelay` and a zero pre-skip.
+const CHROME: &[u8] = include_bytes!("data/chrome-opus-stereo.webm");
+/// Recorded by Safari 27's `MediaRecorder`: the same layout as Chrome's, with
+/// 2.5 ms packets.
+const SAFARI: &[u8] = include_bytes!("data/safari-opus-stereo.webm");
+
 const PACKETS: u64 = 30;
 const END_TRIM: u64 = 100;
 
@@ -175,6 +182,24 @@ fn reads_segments_and_clusters_of_unknown_size() {
     ]
     .concat();
     assert_same(&webm(bytes).unwrap(), &ogg_reference());
+}
+
+#[test]
+fn reads_chrome_recordings() {
+    let source = WebmOpusSource::new(Cursor::new(CHROME)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    // 15 packets of three 20 ms frames, with nothing to trim, as FFmpeg also
+    // decodes it.
+    assert_eq!(samples(source).unwrap().len(), 43_200 * 2);
+}
+
+#[test]
+fn reads_safari_recordings() {
+    let source = WebmOpusSource::new(Cursor::new(SAFARI)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    // 404 packets of 120 frames, with nothing to trim, as FFmpeg also decodes
+    // it.
+    assert_eq!(samples(source).unwrap().len(), 48_480 * 2);
 }
 
 #[test]

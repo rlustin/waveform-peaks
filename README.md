@@ -44,7 +44,9 @@ while the upload continues.
 
 `WebmOpusSource` also reads browser `MediaRecorder` recordings, which have
 clusters of unknown size. `Mp4Source::new` reads fragmented MP4, which Safari
-and Chrome record, and MP4 that has the `moov` box first.
+and Chrome record, and MP4 that has the `moov` box first. The tests include
+real recordings from Chrome 155 and Safari 27: Opus in WebM, and Opus and AAC
+in MP4.
 
 FFmpeg and phones write the media data before the `moov` box by default. To
 read this layout, use `Mp4Source::new_seekable` on an input that implements

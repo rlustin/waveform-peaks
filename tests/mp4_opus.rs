@@ -12,6 +12,9 @@ use waveform_peaks::{DecodeRate, Error, Mp4Options, Mp4Source, OggOpusSource, Pc
 /// Recorded by Chrome 155's `MediaRecorder`: fragmented and stereo, with the
 /// sample tables before the sample description and no edit list.
 const CHROME: &[u8] = include_bytes!("data/chrome-opus-stereo.mp4");
+/// Recorded by Safari 27's `MediaRecorder`: fragmented and stereo, with
+/// 2.5 ms packets and an edit list of unknown duration.
+const SAFARI: &[u8] = include_bytes!("data/safari-opus-stereo.mp4");
 
 const PACKETS: u64 = 30;
 const END_TRIM: u64 = 100;
@@ -70,6 +73,15 @@ fn reads_chrome_recordings() {
     // 45 packets of 960 frames, less Chrome's 3,840-frame (80 ms) dOps
     // pre-skip, as FFmpeg also decodes it.
     assert_eq!(samples(source).unwrap().len(), 39_360 * 2);
+}
+
+#[test]
+fn reads_safari_recordings() {
+    let source = Mp4Source::new(Cursor::new(SAFARI)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    // 401 packets of 120 frames, less the edit list's 312-frame pre-skip, as
+    // FFmpeg also decodes it.
+    assert_eq!(samples(source).unwrap().len(), 47_808 * 2);
 }
 
 /// The edit list is in the media timescale, which need not be 48 kHz.
