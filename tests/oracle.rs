@@ -157,6 +157,14 @@ fn decoded<P: PcmSource>(source: P) -> (Vec<i16>, u32, u16) {
     (common::samples(source).unwrap(), rate, channels)
 }
 
+/// Checks that FFmpeg wrote the media data before the moov box.
+#[cfg(any(feature = "aac", feature = "mp3"))]
+fn assert_media_first(path: &Path) {
+    let file = fs::read(path).unwrap();
+    let find = |kind: &[u8]| file.windows(4).position(|w| w == kind).unwrap();
+    assert!(find(b"mdat") < find(b"moov"), "{}", path.display());
+}
+
 #[cfg(feature = "opus")]
 mod opus_input {
     use super::*;
@@ -486,6 +494,8 @@ mod aac_input {
     enum Layout {
         Adts,
         FastStart,
+        /// FFmpeg's default, with the media data before the moov box.
+        MediaFirst,
         Fragmented,
         /// Apple's encoder, as Safari records with: iTunSMPB, no edit list.
         Apple,
@@ -510,6 +520,10 @@ mod aac_input {
             Layout::Adts => ffmpeg(&[&input[..], &aac, &["-f", "adts", out]].concat()),
             Layout::FastStart => {
                 ffmpeg(&[&input[..], &aac, &["-movflags", "+faststart", out]].concat())
+            }
+            Layout::MediaFirst => {
+                ffmpeg(&[&input[..], &aac, &[out]].concat());
+                assert_media_first(&path);
             }
             Layout::Fragmented => ffmpeg(
                 &[
@@ -536,10 +550,10 @@ mod aac_input {
 
     fn decode_ours(path: &Path, layout: Layout) -> (Vec<i16>, u32, u16) {
         let file = fs::File::open(path).unwrap();
-        if layout == Layout::Adts {
-            decoded(AdtsAacSource::new(file).unwrap())
-        } else {
-            decoded(Mp4Source::new(file).unwrap())
+        match layout {
+            Layout::Adts => decoded(AdtsAacSource::new(file).unwrap()),
+            Layout::MediaFirst => decoded(Mp4Source::new_seekable(file).unwrap()),
+            _ => decoded(Mp4Source::new(file).unwrap()),
         }
     }
 
@@ -584,6 +598,7 @@ mod aac_input {
             for layout in [
                 Layout::Adts,
                 Layout::FastStart,
+                Layout::MediaFirst,
                 Layout::Fragmented,
                 Layout::Apple,
             ] {
@@ -608,7 +623,7 @@ mod aac_input {
                     // FFmpeg trims the priming but keeps the end padding,
                     // which this crate drops. FFmpeg's edit list stores the
                     // length in milliseconds.
-                    Layout::FastStart | Layout::Apple => {
+                    Layout::FastStart | Layout::MediaFirst | Layout::Apple => {
                         let expected = fixture.seconds * rate as f64;
                         let slack = rate as f64 / 1000.0;
                         assert!(
@@ -795,6 +810,8 @@ mod mpeg_audio_input {
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Layout {
         FastStart,
+        /// FFmpeg's default, with the media data before the moov box.
+        MediaFirst,
         Fragmented,
         /// QuickTime, with a `.mp3` or `.mp2` sample entry.
         Mov,
@@ -803,6 +820,7 @@ mod mpeg_audio_input {
     fn encode_mp4(dir: &Path, fixture: &Fixture, layout: Layout) -> std::path::PathBuf {
         let (extension, flags): (_, &[&str]) = match layout {
             Layout::FastStart => ("mp4", &["-movflags", "+faststart"]),
+            Layout::MediaFirst => ("mp4", &[]),
             Layout::Fragmented => (
                 "mp4",
                 &[
@@ -836,6 +854,9 @@ mod mpeg_audio_input {
             ]
             .concat(),
         );
+        if layout == Layout::MediaFirst {
+            assert_media_first(&path);
+        }
         path
     }
 
@@ -863,11 +884,21 @@ mod mpeg_audio_input {
     fn mp4_matches_ffmpeg() {
         let dir = TempDir::new().unwrap();
         for fixture in FIXTURES {
-            for layout in [Layout::FastStart, Layout::Fragmented, Layout::Mov] {
+            for layout in [
+                Layout::FastStart,
+                Layout::MediaFirst,
+                Layout::Fragmented,
+                Layout::Mov,
+            ] {
                 let context = format!("{}, {layout:?}", fixture.name);
                 let path = encode_mp4(dir.path(), fixture, layout);
-                let (ours, rate, channels) =
-                    decoded(Mp4Source::new(fs::File::open(&path).unwrap()).unwrap());
+                let file = fs::File::open(&path).unwrap();
+                let source = if layout == Layout::MediaFirst {
+                    Mp4Source::new_seekable(file)
+                } else {
+                    Mp4Source::new(file)
+                };
+                let (ours, rate, channels) = decoded(source.unwrap());
                 assert_eq!(
                     (rate, channels),
                     (fixture.rate, fixture.channels),
@@ -882,7 +913,7 @@ mod mpeg_audio_input {
                     // FFmpeg's edit list stores the duration in milliseconds.
                     // For MP2 it ends the encoder delay, 481 frames, before
                     // the end of the input.
-                    Layout::FastStart | Layout::Mov => {
+                    Layout::FastStart | Layout::MediaFirst | Layout::Mov => {
                         let frames = (ours.len() / channels as usize) as f64;
                         let delay = if fixture.name.starts_with("mp2") {
                             481.0

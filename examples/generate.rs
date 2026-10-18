@@ -67,7 +67,7 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
         return Ok(Box::new(WebmOpusSource::new(input)?));
     }
     if mp4 {
-        return Ok(Box::new(Mp4Source::new(input)?));
+        return Ok(Box::new(Mp4Source::new_seekable(input)?));
     }
     #[cfg(feature = "aac")]
     if adts {

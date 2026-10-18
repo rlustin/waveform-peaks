@@ -43,8 +43,13 @@ Each source reads from a plain `Read`. Thus a source can decode an upload body
 while the upload continues.
 
 `WebmOpusSource` also reads browser `MediaRecorder` recordings, which have
-clusters of unknown size. `Mp4Source` reads fragmented MP4, which Safari and
-Chrome record, and MP4 that has the `moov` box first.
+clusters of unknown size. `Mp4Source::new` reads fragmented MP4, which Safari
+and Chrome record, and MP4 that has the `moov` box first.
+
+FFmpeg and phones write the media data before the `moov` box by default. To
+read this layout, use `Mp4Source::new_seekable` on an input that implements
+`Seek`, for example an upload saved to disk. `new_seekable` also reads the two
+other layouts.
 
 ## Memory use
 
@@ -202,13 +207,13 @@ programs. The tests compare:
   audiowaveform output within the Opus tolerance;
 - the same fixtures remuxed to fast-start and fragmented MP4. The output must
   be equal to the Ogg output of this crate, except for the FFmpeg end trimming;
-- AAC that FFmpeg encodes as ADTS, fast-start MP4 and fragmented MP4, and AAC
-  from Apple `afconvert` if it is available. The reference is the FFmpeg
-  decoder;
+- AAC that FFmpeg encodes as ADTS, and as MP4 in three layouts: fast start,
+  fragmented, and media data before the `moov` box. The tests also use AAC from
+  Apple `afconvert` if it is available. The reference is the FFmpeg decoder;
 - MP3 and MP2 that FFmpeg encodes, with and without an Info tag: MPEG-1,
   MPEG-2 and MPEG-2.5, constant and variable bit rates, and a square wave that
   clips. The reference is audiowaveform, with a tolerance of ±1 per value;
-- the same MPEG audio fixtures in fast-start MP4, fragmented MP4 and
+- the same MPEG audio fixtures in the same three MP4 layouts, and in
   QuickTime. The reference is the FFmpeg decoder, with a tolerance of ±1 per
   sample.
 
@@ -227,9 +232,6 @@ this crate, the output is the same as the audiowaveform output.
 - Other formats (WAV, FLAC, Vorbis) are not supported. Symphonia can
   decode them, but each of its format crates needs an MPL-2.0 exception in
   `deny.toml`.
-- `Mp4Source` rejects MP4 with the media data before the `moov` box. FFmpeg and
-  phones write this layout by default. To read this layout, the crate needs a
-  `Read + Seek` constructor for files spooled to disk.
 - Symphonia does not decode the SBR and parametric stereo layers of HE-AAC.
 - `MpegAudioSource` rejects data between frames. libmad skips this data.
 - `MpegAudioSource` and `Mp4Source` reject free-format bit rates.

@@ -19,4 +19,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(mut source) = Mp4Source::with_options(Cursor::new(file), mp4_options) {
         let _ = generate(&mut source, &options, &Limits::default(), MemorySink::new());
     }
+    if let Ok(mut source) = Mp4Source::seekable_with_options(Cursor::new(file), mp4_options) {
+        let _ = generate(&mut source, &options, &Limits::default(), MemorySink::new());
+    }
 });

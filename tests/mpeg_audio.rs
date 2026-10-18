@@ -184,6 +184,15 @@ fn rejects_malformed_streams() {
 }
 
 #[test]
+fn seekable_mp4_reads_media_data_before_moov() {
+    let track = mpa_track(0x6B, 2, 48_000, &mpa_frames(MP2));
+    let file = media_first_mp4(&[track], 1000, &[]);
+    let source = Mp4Source::new_seekable(Cursor::new(file)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    assert_same(&samples(source).unwrap(), &stream(MP2).unwrap());
+}
+
+#[test]
 fn mp4_matches_the_stream_with_the_same_frames() {
     let frames = mp3_audio_frames();
     for object_type in [0x6B, 0x69] {

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Seek};
 #[cfg(feature = "opus")]
 use std::sync::{Mutex, PoisonError};
 
@@ -33,7 +33,7 @@ const MAX_SAMPLE_BYTES: usize = 64 * 1024;
 #[non_exhaustive]
 pub struct Mp4Options {
     /// Largest MP4 metadata buffered: the sample tables of the audio track,
-    /// read before its media data, or each `moof` box of a fragmented file
+    /// read from the `moov` box, or each `moof` box of a fragmented file
     /// together with the sample list read from it. Bounds memory against
     /// crafted sizes. Other boxes, such as cover art, are read past without
     /// being buffered. The default, 64 MiB, holds the tables of several days
@@ -62,16 +62,17 @@ impl Default for Mp4Options {
 /// their feature or with a profile, channel layout or channel mapping family
 /// this crate does not decode, are passed over.
 ///
-/// Reads with plain `Read`, so an upload body can be decoded as it arrives.
-/// Reads are buffered internally. This needs the `moov` box before the media
-/// data, which holds for fragmented files (as recorders write) and for files
-/// written with the `moov` box first ("fast start"). A file with its media data
-/// first, as FFmpeg writes by default, is [`Error::Unsupported`]: it cannot be
-/// decoded without holding or seeking back over all of its media data.
+/// [`new`](Self::new) reads with plain `Read`, so an upload body can be
+/// decoded as it arrives. Reads are buffered internally. This needs the `moov`
+/// box before the media data, which holds for fragmented files (as recorders
+/// write) and for files written with the `moov` box first ("fast start"). A
+/// file with its media data first, as FFmpeg and phones write by default, needs
+/// [`new_seekable`](Self::new_seekable), which seeks past the media data to the
+/// `moov` box and back, so that the media data is still read once.
 ///
 /// Memory is one sample and one decoded sample, plus the sample tables of the
-/// audio track, which a non-fragmented file stores before its media data (4
-/// bytes per sample, about 700 KB per hour of AAC at 48 kHz), or the current
+/// audio track, which a non-fragmented file stores in its `moov` box (4 bytes
+/// per sample, about 700 KB per hour of AAC at 48 kHz), or the current
 /// `moof` box of a fragmented one. Other tracks and metadata, such as cover
 /// art, are read past without being buffered. Both are bounded by
 /// [`Mp4Options::max_table_bytes`].
@@ -96,6 +97,7 @@ pub struct Mp4Source<R: Read> {
 /// Reads the samples of the chosen track out of the media data.
 struct Media<R: Read> {
     reader: BoxReader<R>,
+    moov_start: u64,
     track_id: u32,
     defaults: HashMap<u32, TrackDefaults>,
     max_table_bytes: usize,
@@ -133,7 +135,8 @@ impl<R: Read> Mp4Source<R> {
     ///   boxes are malformed, including a `dOps` box with channel mapping
     ///   family 0 and more than two channels.
     /// - [`Error::Unsupported`] when the media data comes before the `moov`
-    ///   box, or when no audio track can be decoded: none is AAC, Opus or MPEG
+    ///   box, which [`seekable_with_options`](Self::seekable_with_options)
+    ///   reads, or when no audio track can be decoded: none is AAC, Opus or MPEG
     ///   audio with its feature enabled, or each is encrypted, AAC other than
     ///   AAC-LC in mono or stereo, or Opus with a channel mapping family other
     ///   than 0; or when the first MPEG audio sample is not one frame, or has
@@ -141,33 +144,19 @@ impl<R: Read> Mp4Source<R> {
     /// - [`Error::LimitExceeded`] when the sample tables pass
     ///   [`Mp4Options::max_table_bytes`].
     pub fn with_options(reader: R, options: Mp4Options) -> Result<Self, Error> {
-        let mut reader = BoxReader {
-            input: CountingReader::new(reader, "truncated box"),
-        };
-        let movie = loop {
-            let mp4_box = reader.next_box()?.ok_or_else(|| {
-                if reader.position() == 0 {
-                    invalid("empty input")
-                } else {
-                    invalid("no moov box")
-                }
-            })?;
-            if !is_box_type(&mp4_box.kind) {
-                return Err(invalid("not an MP4 file"));
-            }
-            match &mp4_box.kind {
-                b"moov" => break read_movie(&mut reader, &mp4_box, options.max_table_bytes)?,
-                b"mdat" if mp4_box.end != Some(reader.position()) => {
-                    return Err(Error::Unsupported(
-                        "MP4 media data before the moov box; write the file with \
-                         the moov box first (fast start) or fragmented"
-                            .into(),
-                    ));
-                }
-                b"moof" => return Err(invalid("moof box before the moov box")),
-                _ => reader.skip_box(&mp4_box)?,
-            }
-        };
+        let mut reader = BoxReader::new(reader);
+        let movie = read_to_movie(&mut reader, options.max_table_bytes, |_, _, _| {
+            Err(Error::Unsupported(
+                "MP4 media data before the moov box; read the file with \
+                 Mp4Source::new_seekable, or write it with the moov box first \
+                 (fast start) or fragmented"
+                    .into(),
+            ))
+        })?;
+        Self::from_movie(reader, movie, options)
+    }
+
+    fn from_movie(reader: BoxReader<R>, movie: Movie, options: Mp4Options) -> Result<Self, Error> {
         let track = movie.track;
         let edit_range = |rate| {
             track
@@ -178,6 +167,7 @@ impl<R: Read> Mp4Source<R> {
         #[cfg_attr(not(feature = "mp3"), allow(unused_mut))]
         let mut media = Media {
             reader,
+            moov_start: movie.moov_start,
             track_id: track.id,
             defaults: movie.defaults,
             max_table_bytes: options.max_table_bytes,
@@ -257,6 +247,77 @@ impl<R: Read> Mp4Source<R> {
             decoder,
             pending,
         })
+    }
+}
+
+impl<R: Read + Seek> Mp4Source<R> {
+    /// Reads up to the end of the `moov` box, wherever it is, with default
+    /// options.
+    ///
+    /// # Errors
+    ///
+    /// As for [`seekable_with_options`](Self::seekable_with_options).
+    pub fn new_seekable(reader: R) -> Result<Self, Error> {
+        Self::seekable_with_options(reader, Mp4Options::default())
+    }
+
+    /// Reads up to the end of the `moov` box, seeking past the media data that
+    /// comes before it, then seeks back to the start of that media data. The
+    /// MP4 file starts at the current position of `reader`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`with_options`](Self::with_options), except that media data
+    /// before the `moov` box is read, and [`Error::Io`] when seeking fails.
+    pub fn seekable_with_options(reader: R, options: Mp4Options) -> Result<Self, Error> {
+        let mut reader = BoxReader::new(reader);
+        let mut media_start = None;
+        let movie = read_to_movie(
+            &mut reader,
+            options.max_table_bytes,
+            |reader, start, end| {
+                media_start.get_or_insert(start);
+                reader.seek_to(end)
+            },
+        )?;
+        if let Some(start) = media_start {
+            reader.seek_to(start)?;
+        }
+        Self::from_movie(reader, movie, options)
+    }
+}
+
+/// Reads the top-level boxes up to the end of the `moov` box. `media_first`
+/// handles an `mdat` box with data that comes before it, given its start and
+/// end.
+fn read_to_movie<R: Read>(
+    reader: &mut BoxReader<R>,
+    max_table_bytes: usize,
+    mut media_first: impl FnMut(&mut BoxReader<R>, u64, u64) -> Result<(), Error>,
+) -> Result<Movie, Error> {
+    loop {
+        let mp4_box = reader.next_box()?.ok_or_else(|| {
+            if reader.position() == 0 {
+                invalid("empty input")
+            } else {
+                invalid("no moov box")
+            }
+        })?;
+        if !is_box_type(&mp4_box.kind) {
+            return Err(invalid("not an MP4 file"));
+        }
+        match &mp4_box.kind {
+            b"moov" => return read_movie(reader, &mp4_box, max_table_bytes),
+            b"mdat" if mp4_box.end != Some(reader.position()) => {
+                // An open-ended mdat box leaves no room for a moov box.
+                let end = mp4_box
+                    .end
+                    .ok_or_else(|| invalid("open-ended mdat box before the moov box"))?;
+                media_first(reader, mp4_box.start, end)?;
+            }
+            b"moof" => return Err(invalid("moof box before the moov box")),
+            _ => reader.skip_box(&mp4_box)?,
+        }
     }
 }
 
@@ -353,6 +414,8 @@ impl<R: Read> Media<R> {
             };
             match &mp4_box.kind {
                 b"mdat" => self.mdat = Some(mp4_box.end),
+                // Met again after seeking back to the media data before it.
+                b"moov" if mp4_box.start == self.moov_start => self.reader.skip_box(&mp4_box)?,
                 b"moof" | b"moov" => return Err(invalid("sample outside the media data")),
                 _ => self.reader.skip_box(&mp4_box)?,
             }
@@ -507,6 +570,7 @@ fn opus(decoder: &mut Mutex<OpusDecoder>) -> &mut OpusDecoder {
 
 /// What the `moov` box says about the chosen track and its fragments.
 struct Movie {
+    moov_start: u64,
     timescale: u32,
     track: Track,
     defaults: HashMap<u32, TrackDefaults>,
@@ -622,6 +686,7 @@ fn read_movie<R: Read>(
         .filter(|&timescale| timescale != 0)
         .ok_or_else(|| invalid("missing movie timescale"))?;
     Ok(Movie {
+        moov_start: moov.start,
         timescale,
         track,
         defaults,
@@ -1423,6 +1488,12 @@ struct BoxReader<R> {
 }
 
 impl<R: Read> BoxReader<R> {
+    fn new(reader: R) -> Self {
+        BoxReader {
+            input: CountingReader::new(reader, "truncated box"),
+        }
+    }
+
     fn position(&self) -> u64 {
         self.input.position()
     }
@@ -1490,5 +1561,11 @@ impl<R: Read> BoxReader<R> {
 
     fn skip_bytes(&mut self, len: u64) -> Result<(), Error> {
         self.input.skip(len)
+    }
+}
+
+impl<R: Read + Seek> BoxReader<R> {
+    fn seek_to(&mut self, position: u64) -> Result<(), Error> {
+        self.input.seek_to(position)
     }
 }

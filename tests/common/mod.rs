@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{ffi::OsStr, path::PathBuf, process::Command};
+use std::{ffi::OsStr, ops::RangeBounds, path::PathBuf, process::Command};
 
 use waveform_peaks::{Bits, ChannelMode, Error, Options, PcmSource};
 
@@ -699,16 +699,7 @@ pub fn faststart_mp4(
     let placeholder: Vec<Vec<u64>> = tracks.iter().map(|t| vec![0; t.chunks.len()]).collect();
     let data_start = (ftyp().len() + build(&placeholder).len() + between.len() + 8) as u64;
     let mut offsets = vec![Vec::new(); tracks.len()];
-    let mut mdat = Vec::new();
-    let rounds = tracks.iter().map(|t| t.chunks.len()).max().unwrap_or(0);
-    for round in 0..rounds {
-        for (index, track) in tracks.iter().enumerate() {
-            if let Some(chunk) = track.chunks.get(round) {
-                offsets[index].push(data_start + mdat.len() as u64);
-                mdat.extend(chunk.concat());
-            }
-        }
-    }
+    let mdat = interleave(tracks, 0.., data_start, &mut offsets);
     [
         ftyp(),
         build(&offsets),
@@ -716,6 +707,65 @@ pub fn faststart_mp4(
         mp4_box(b"mdat", &mdat),
     ]
     .concat()
+}
+
+/// A non-fragmented MP4 file laid out as FFmpeg writes by default: a free
+/// box, the mdat box, then the moov box.
+pub fn media_first_mp4(tracks: &[Mp4Track], movie_timescale: u32, extra: &[u8]) -> Vec<u8> {
+    media_around_moov(tracks, movie_timescale, extra, 0)
+}
+
+/// Like [`media_first_mp4`], but with the last `rounds_after` rounds of chunks
+/// in a second mdat box after the moov box.
+pub fn media_around_moov(
+    tracks: &[Mp4Track],
+    movie_timescale: u32,
+    extra: &[u8],
+    rounds_after: usize,
+) -> Vec<u8> {
+    let build = |offsets: &[Vec<u64>]| {
+        let traks: Vec<Vec<u8>> = tracks.iter().zip(offsets).map(|(t, o)| t.trak(o)).collect();
+        moov(movie_timescale, &traks, extra)
+    };
+    let rounds = tracks.iter().map(|t| t.chunks.len()).max().unwrap_or(0);
+    let split = rounds.saturating_sub(rounds_after);
+    let free = mp4_box(b"free", &[]);
+    let mut offsets = vec![Vec::new(); tracks.len()];
+    let before = interleave(
+        tracks,
+        ..split,
+        (ftyp().len() + free.len() + 8) as u64,
+        &mut offsets,
+    );
+    let placeholder: Vec<Vec<u64>> = tracks.iter().map(|t| vec![0; t.chunks.len()]).collect();
+    let after_start = ftyp().len() + free.len() + 8 + before.len() + build(&placeholder).len() + 8;
+    let after = interleave(tracks, split.., after_start as u64, &mut offsets);
+    let mut file = [ftyp(), free, mp4_box(b"mdat", &before), build(&offsets)].concat();
+    if !after.is_empty() {
+        file.extend(mp4_box(b"mdat", &after));
+    }
+    file
+}
+
+/// Stores the chunks of the tracks in turn, for the rounds in `rounds`, from
+/// `data_start`. Adds their offsets to `offsets` and returns the media data.
+fn interleave(
+    tracks: &[Mp4Track],
+    rounds: impl RangeBounds<usize>,
+    data_start: u64,
+    offsets: &mut [Vec<u64>],
+) -> Vec<u8> {
+    let mut mdat = Vec::new();
+    let count = tracks.iter().map(|t| t.chunks.len()).max().unwrap_or(0);
+    for round in (0..count).filter(|round| rounds.contains(round)) {
+        for (index, track) in tracks.iter().enumerate() {
+            if let Some(chunk) = track.chunks.get(round) {
+                offsets[index].push(data_start + mdat.len() as u64);
+                mdat.extend(chunk.concat());
+            }
+        }
+    }
+    mdat
 }
 
 /// A fragmented MP4 file: an empty moov box, then a moof and mdat box per
