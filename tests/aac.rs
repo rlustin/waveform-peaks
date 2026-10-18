@@ -15,6 +15,9 @@ const STEREO: &[u8] = include_bytes!("data/chord-stereo-48000.aac");
 /// Recorded by Chrome 155's `MediaRecorder`: fragmented and stereo, with the
 /// sample tables before the sample description and no edit list.
 const CHROME: &[u8] = include_bytes!("data/chrome-aac-stereo.mp4");
+/// Recorded by Safari 27's `MediaRecorder`: fragmented and stereo, with an
+/// edit list of unknown duration.
+const SAFARI: &[u8] = include_bytes!("data/safari-aac-stereo.mp4");
 /// HE-AAC from Apple's encoder, which signals SBR only inside the frames.
 const HE_AAC: &[u8] = include_bytes!("data/he-aac-apple.m4a");
 
@@ -142,6 +145,15 @@ fn reads_chrome_recordings() {
     // 43 frames of 1,024, with nothing to trim them by, as FFmpeg also decodes
     // it.
     assert_eq!(samples(source).unwrap().len(), 44_032 * 2);
+}
+
+#[test]
+fn reads_safari_recordings() {
+    let source = Mp4Source::new(Cursor::new(SAFARI)).unwrap();
+    assert_eq!((source.sample_rate(), source.channels()), (48_000, 2));
+    // 49 frames of 1,024, less the edit list's 2,112 priming frames, as FFmpeg
+    // also decodes it.
+    assert_eq!(samples(source).unwrap().len(), 48_064 * 2);
 }
 
 /// The codec is unknown while the tables are read, so the limit applies once
