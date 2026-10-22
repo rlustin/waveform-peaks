@@ -4,7 +4,7 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.4] - 2026-10-22
 
 ### Added
 
@@ -12,6 +12,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with the media data before the `moov` box, as FFmpeg and phones write by
   default. They need a `Read + Seek` input, such as an upload saved to disk,
   and still read the media data only once.
+
+### Changed
+
+- `Mp4Source::new` returns `Error::InvalidInput` instead of
+  `Error::Unsupported` for an `mdat` box that continues to the end of the
+  file before the `moov` box. No `moov` box can follow it, so a remux or a
+  seekable input does not help.
 
 ## [0.1.3] - 2026-10-16
 
@@ -64,7 +71,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AAC input from MP4 (fragmented or with the `moov` box first) and ADTS,
   behind the optional `aac` feature.
 
-[Unreleased]: https://github.com/rlustin/waveform-peaks/compare/v0.1.3...HEAD
+[0.1.4]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.4
 [0.1.3]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.3
 [0.1.2]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.1
