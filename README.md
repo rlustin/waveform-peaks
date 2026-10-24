@@ -173,11 +173,11 @@ cargo deny check                       # dependency licenses and advisories
 cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio
 ```
 
-GitHub Actions runs all of these commands, except the oracle tests, on each
-push and pull request. CI also runs the tests on Rust 1.88, and runs each fuzz
-target for one minute. Tests and Clippy run on five feature combinations
-(default, none, `aac` only, `mp3` only, and all), so that each combination
-stays clean.
+GitHub Actions runs all of these commands on each push and pull request.
+The tests run on Linux, macOS and Windows. CI also runs the tests on
+Rust 1.88, and runs each fuzz target for one minute. Tests and Clippy run
+on five feature combinations (default, none, `aac` only, `mp3` only, and
+all), so that each combination stays clean.
 
 `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 Fuzzing needs a nightly toolchain and
@@ -196,7 +196,9 @@ directories of `-fork` fill the disk.
 The oracle tests need `audiowaveform`, and `ffmpeg` with libopus and
 libmp3lame, on `PATH`.
 Alternatively, set `AUDIOWAVEFORM` and `FFMPEG` to the paths of the two
-programs. The tests compare:
+programs. CI installs `audiowaveform` from the
+[audiowaveform PPA](https://launchpad.net/~chris-needham/+archive/ubuntu/ppa)
+and `ffmpeg` from Ubuntu. The tests compare:
 
 - raw PCM, byte for byte, in 192 combinations of channels, length, zoom, bits,
   and mixdown or split;
