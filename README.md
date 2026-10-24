@@ -241,8 +241,8 @@ this crate, the output is the same as the audiowaveform output.
 - `MpegAudioSource` and `Mp4Source` reject free-format bit rates.
 - `Mp4Source` rejects an MP4 sample that holds more than one MPEG audio
   frame.
-- AAC in Matroska or WebM is not supported. Chrome can record this
-  combination.
+- AAC in Matroska or WebM is not supported. Chrome and Safari do not record
+  this combination: they record AAC in MP4 only.
 - `WebmOpusSource` skips compressed and encrypted tracks. For a file with
   several segments, `WebmOpusSource` decodes only the first segment.
 - One run makes peaks at one zoom level only.
