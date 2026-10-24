@@ -89,15 +89,23 @@ pub fn parse_dat(bytes: &[u8]) -> Dat {
 pub fn assert_dat_matches(ours: &[u8], reference: &[u8], tolerance: i32, context: &str) {
     let (a, b) = (parse_dat(ours), parse_dat(reference));
     assert_eq!(a.header, b.header, "{context}: headers differ");
+    assert_values_match(&a.values, &b.values, tolerance, context);
+    if tolerance == 0 {
+        assert_eq!(ours, reference, "{context}: bytes differ");
+    }
+}
+
+/// Asserts two peak value lists have the same length and differ by at most
+/// `tolerance` per value.
+pub fn assert_values_match(ours: &[i32], reference: &[i32], tolerance: i32, context: &str) {
     assert_eq!(
-        a.values.len(),
-        b.values.len(),
+        ours.len(),
+        reference.len(),
         "{context}: value counts differ"
     );
-    let diffs: Vec<(usize, i32, i32)> = a
-        .values
+    let diffs: Vec<(usize, i32, i32)> = ours
         .iter()
-        .zip(&b.values)
+        .zip(reference)
         .enumerate()
         .filter(|(_, (x, y))| x != y)
         .map(|(i, (&x, &y))| (i, x, y))
@@ -111,12 +119,9 @@ pub fn assert_dat_matches(ours: &[u8], reference: &[u8], tolerance: i32, context
         worst <= tolerance,
         "{context}: {} of {} values differ, max |diff| {worst} (tolerance {tolerance}); first (index, ours, reference): {:?}",
         diffs.len(),
-        a.values.len(),
+        ours.len(),
         &diffs[..diffs.len().min(8)]
     );
-    if tolerance == 0 {
-        assert_eq!(ours, reference, "{context}: bytes differ");
-    }
 }
 
 /// Path of an external tool, overridable with an environment variable.

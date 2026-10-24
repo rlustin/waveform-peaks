@@ -223,8 +223,10 @@ and `ffmpeg` from Ubuntu. The tests compare:
 
 Opus comparisons accept a difference of ±1 per value. The `opus` crate bundles
 its own libopus build. The float output of this build is different in the last
-bit from the Homebrew libopus. With the Homebrew libopus and the conversion of
-this crate, the output is the same as the audiowaveform output.
+bit from the system libopus that audiowaveform uses. The values that are
+different can change from one machine to another. With the Homebrew libopus
+and the conversion of this crate, the output is the same as the audiowaveform
+output.
 
 ## Limitations
 
