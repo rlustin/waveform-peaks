@@ -175,8 +175,9 @@ mod opus_input {
     /// Largest accepted per-value difference for Opus input.
     ///
     /// The `opus` crate builds its own copy of libopus, whose float output
-    /// differs in the last bit from the Homebrew libopus audiowaveform links.
-    /// After scaling, a few samples in ten thousand land 1 apart. Decoding the
+    /// differs in the last bit from the system libopus audiowaveform links.
+    /// After scaling, a few samples in ten thousand land 1 apart, and which
+    /// ones can change from one machine to the next. Decoding the
     /// same files with Homebrew's libopus and this crate's conversion gives
     /// identical output, so the conversion itself is exact.
     const OPUS_TOLERANCE: i32 = 1;
@@ -308,9 +309,15 @@ mod opus_input {
         let mut source =
             OggOpusSource::with_options(fs::File::open(&input).unwrap(), wrap()).unwrap();
         let actual = ours(&mut source, &options, JsonWriter::new(Vec::new()));
-        let expected: serde_json::Value = serde_json::from_slice(&expected).unwrap();
-        let actual: serde_json::Value = serde_json::from_slice(&actual).unwrap();
-        assert_eq!(actual, expected);
+        let mut expected: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+        let mut actual: serde_json::Value = serde_json::from_slice(&actual).unwrap();
+        let take_data = |json: &mut serde_json::Value| -> Vec<i32> {
+            serde_json::from_value(json["data"].take()).unwrap()
+        };
+        let (our_data, their_data) = (take_data(&mut actual), take_data(&mut expected));
+        let context = format!("{}, {options:?}", FIXTURES[1].name);
+        assert_eq!(actual, expected, "{context}");
+        common::assert_values_match(&our_data, &their_data, OPUS_TOLERANCE, &context);
     }
 
     /// Remuxes `ogg` to WebM without touching the packets. `live` writes a
