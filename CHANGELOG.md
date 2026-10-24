@@ -4,6 +4,24 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `MpegAudioSource` reads damaged files as audiowaveform does, instead of
+  returning `Error::InvalidInput`. It skips data between frames and before
+  the first frame, such as junk or an ID3 tag, and drops a frame that does
+  not decode. Frames after an ID3v1 tag in the middle of a file now decode.
+  As with audiowaveform, input in another format is now read to the end
+  before the error, instead of failing on its first bytes.
+
+### Fixed
+
+- `MpegAudioSource` drops the layer III frames that audiowaveform drops at
+  the start of a stream cut from a longer one, because their main data is in
+  frames that are not there. The output had one or two frames more, which
+  shifted every peak.
+
 ## [0.1.4] - 2026-10-22
 
 ### Added
@@ -71,6 +89,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AAC input from MP4 (fragmented or with the `moov` box first) and ADTS,
   behind the optional `aac` feature.
 
+[Unreleased]: https://github.com/rlustin/waveform-peaks/compare/v0.1.4...HEAD
 [0.1.4]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.4
 [0.1.3]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.3
 [0.1.2]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.2
