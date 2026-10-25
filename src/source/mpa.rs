@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use symphonia_bundle_mp3::MpaDecoder as SymphoniaDecoder;
+use symphonia_core::audio::GenericAudioBufferRef;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::packet::PacketRef;
@@ -96,8 +97,17 @@ impl Header {
         if self.is_mono() { 1 } else { 2 }
     }
 
-    fn has_crc(self) -> bool {
-        self.0 >> 16 & 1 == 0
+    fn crc_bytes(self) -> usize {
+        if self.0 >> 16 & 1 == 0 { 2 } else { 0 }
+    }
+
+    fn side_info_bytes(self) -> usize {
+        match (self.is_mpeg1(), self.is_mono()) {
+            (true, true) => 17,
+            (true, false) => 32,
+            (false, true) => 9,
+            (false, false) => 17,
+        }
     }
 
     /// The whole frame, header included.
@@ -143,13 +153,7 @@ impl Header {
         if self.layer() != 3 {
             return None;
         }
-        let side_info = match (self.is_mpeg1(), self.is_mono()) {
-            (true, true) => 17,
-            (true, false) => 32,
-            (false, true) => 9,
-            (false, false) => 17,
-        };
-        let at = HEADER_BYTES + if self.has_crc() { 2 } else { 0 } + side_info;
+        let at = HEADER_BYTES + self.crc_bytes() + self.side_info_bytes();
         let tag = frame.get(at..at + 8)?;
         if !matches!(&tag[..4], b"Xing" | b"Info") {
             return None;
@@ -169,6 +173,32 @@ impl Header {
             .filter(|lame| matches!(&lame[..4], b"LAME" | b"Lavc"))
             .map(|lame| u32::from_be_bytes([0, lame[21], lame[22], lame[23]]) as u64 >> 12);
         Some(delay)
+    }
+
+    /// How many bytes of main data from earlier frames a layer III frame
+    /// starts with, read from the bit reservoir. 0 for the other layers.
+    pub(crate) fn main_data_begin(self, frame: &[u8]) -> usize {
+        let at = HEADER_BYTES + self.crc_bytes();
+        match frame.get(at..at + 2) {
+            Some(&[high, low]) if self.layer() == 3 => {
+                let bits = u16::from_be_bytes([high, low]);
+                (if self.is_mpeg1() {
+                    bits >> 7
+                } else {
+                    bits >> 8
+                }) as usize
+            }
+            _ => 0,
+        }
+    }
+
+    /// Bytes of main data that a layer III frame adds to the bit reservoir.
+    pub(crate) fn main_data_bytes(self) -> usize {
+        if self.layer() != 3 {
+            return 0;
+        }
+        let side = HEADER_BYTES + self.crc_bytes() + self.side_info_bytes();
+        self.frame_bytes().saturating_sub(side)
     }
 }
 
@@ -201,6 +231,11 @@ impl MpaDecoder {
         })
     }
 
+    /// The header of the first frame.
+    pub(crate) fn header(&self) -> Header {
+        self.header
+    }
+
     pub(crate) fn sample_rate(&self) -> u32 {
         self.header.sample_rate()
     }
@@ -224,18 +259,7 @@ impl MpaDecoder {
     /// Decodes one frame, header included. Returns whether any samples are
     /// left after trimming; they are then in [`output`](Self::output).
     pub(crate) fn decode(&mut self, frame: &[u8]) -> Result<bool, Error> {
-        let bytes = frame
-            .first_chunk()
-            .ok_or_else(|| Error::InvalidInput("truncated MPEG audio frame".into()))?;
-        let header = Header::parse(*bytes)?;
-        if !header.same_stream(self.header) {
-            return Err(Error::InvalidInput(
-                "MPEG audio stream changes layer, rate or channels".into(),
-            ));
-        }
-        header.check_length(frame.len())?;
-        let packet = PacketRef::new(0, Timestamp::ZERO, Duration::ZERO, frame);
-        let decoded = self.decoder.decode_ref(&packet).map_err(mpa_error)?;
+        let decoded = decode_frame(&mut self.decoder, self.header, frame)?;
         // Scaled by 32768 rounding down, as audiowaveform converts libmad's
         // fixed-point output to 16 bits; it clips at -32767, not -32768.
         self.output.push(
@@ -251,10 +275,35 @@ impl MpaDecoder {
         )
     }
 
+    /// Decodes one frame only to fill the bit reservoir, without output and
+    /// without counting it for [`trim`](Self::trim).
+    pub(crate) fn skip(&mut self, frame: &[u8]) -> Result<(), Error> {
+        decode_frame(&mut self.decoder, self.header, frame).map(drop)
+    }
+
     /// Samples kept from the last frame passed to [`decode`](Self::decode).
     pub(crate) fn output(&self) -> &[i16] {
         self.output.samples()
     }
+}
+
+fn decode_frame<'a>(
+    decoder: &'a mut SymphoniaDecoder,
+    stream: Header,
+    frame: &[u8],
+) -> Result<GenericAudioBufferRef<'a>, Error> {
+    let bytes = frame
+        .first_chunk()
+        .ok_or_else(|| Error::InvalidInput("truncated MPEG audio frame".into()))?;
+    let header = Header::parse(*bytes)?;
+    if !header.same_stream(stream) {
+        return Err(Error::InvalidInput(
+            "MPEG audio stream changes layer, rate or channels".into(),
+        ));
+    }
+    header.check_length(frame.len())?;
+    let packet = PacketRef::new(0, Timestamp::ZERO, Duration::ZERO, frame);
+    decoder.decode_ref(&packet).map_err(mpa_error)
 }
 
 impl fmt::Debug for MpaDecoder {

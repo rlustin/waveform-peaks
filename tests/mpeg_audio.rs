@@ -148,6 +148,146 @@ fn stops_at_a_trailing_tag() {
     }
 }
 
+/// Data that is not a frame. audiowaveform skips each of them.
+fn junks() -> Vec<(&'static str, Vec<u8>)> {
+    let header = &mpa_frames(MP2)[0][..4];
+    let mut id3v2 = b"ID3\x04\0\0\0\0\0\x20".to_vec();
+    id3v2.extend([0xFF; 32]);
+    vec![
+        ("zeros", vec![0; 10]),
+        ("sync bytes", vec![0xFF; 10]),
+        (
+            "a header that no frame follows",
+            [&[0; 3], header, &[0; 20]].concat(),
+        ),
+        ("an ID3v2 tag", id3v2),
+        ("an ID3v1 tag", [&b"TAG"[..], &[0; 125]].concat()),
+    ]
+}
+
+/// Frames dropped as libmad drops them after skipped data: while the main
+/// data of a frame starts in earlier frames that were not read.
+fn reservoir_drops(frames: &[Vec<u8>]) -> usize {
+    let mut read = 0;
+    let mut dropped = 0;
+    for frame in frames {
+        // MPEG-1 mono without CRC: 9 bits of main_data_begin after the
+        // header, in 17 bytes of side information.
+        let begin = (frame[4] as usize) << 1 | (frame[5] >> 7) as usize;
+        if begin <= read {
+            break;
+        }
+        read += frame.len() - 4 - 17;
+        dropped += 1;
+    }
+    dropped
+}
+
+#[test]
+fn skips_data_between_frames() {
+    // MP2 has no bit reservoir, so the frames after the junk decode.
+    let frames = mpa_frames(MP2);
+    let expected = stream(MP2).unwrap();
+    for (name, junk) in junks() {
+        let file = [frames[..5].concat(), junk, frames[5..].concat()].concat();
+        assert!(stream(&file).unwrap() == expected, "{name}");
+    }
+}
+
+#[test]
+fn skips_leading_junk() {
+    let expected = stream(MP3).unwrap();
+    for (name, junk) in junks() {
+        let file = [&junk[..], MP3].concat();
+        assert!(stream(&file).unwrap() == expected, "{name}");
+    }
+}
+
+/// Past skipped data, a header is taken only when the header of another
+/// frame follows it, so a last frame after junk is dropped.
+#[test]
+fn frame_after_junk_needs_a_next_frame() {
+    let frames = mpa_frames(MP2);
+    let file = [frames[..5].concat(), vec![0; 10], frames[5].clone()].concat();
+    assert_eq!(stream(&file).unwrap().len(), 5 * 1152 * 2);
+}
+
+#[test]
+fn junk_drops_frames_that_need_the_reservoir() {
+    let frames = mp3_audio_frames();
+    let at = 10;
+    let dropped = reservoir_drops(&frames[at..]);
+    assert!(dropped > 0);
+    let file = [frames[..at].concat(), vec![0; 10], frames[at..].concat()].concat();
+    assert_eq!(
+        stream(&file).unwrap().len(),
+        (frames.len() - dropped) * 1152
+    );
+}
+
+/// A stream cut from a longer one also starts with an empty reservoir.
+#[test]
+fn cut_start_drops_frames_that_need_the_reservoir() {
+    let frames = &mp3_audio_frames()[10..];
+    let dropped = reservoir_drops(frames);
+    assert!(dropped > 0);
+    let file = frames.concat();
+    assert_eq!(
+        stream(&file).unwrap().len(),
+        (frames.len() - dropped) * 1152
+    );
+}
+
+/// As libmad does, a frame that does not decode is dropped.
+#[test]
+fn drops_a_frame_that_does_not_decode() {
+    let frames = mp3_audio_frames();
+    let mut damaged = frames[0].clone();
+    damaged[4..].fill(0xFF);
+    let file = [damaged, frames.concat()].concat();
+    assert_same(&stream(&file).unwrap(), &bare_mp3());
+}
+
+/// libmad keeps the main data of a frame it rejects, so the frames after it
+/// that need this data still decode.
+#[test]
+fn frame_that_does_not_decode_keeps_its_reservoir_data() {
+    let mut frames = mp3_audio_frames();
+    set_big_values(&mut frames[10], 511);
+    assert_eq!(
+        stream(&frames.concat()).unwrap().len(),
+        (frames.len() - 1) * 1152
+    );
+}
+
+/// Sets `big_values` of the first granule in an MPEG-1 mono frame without
+/// CRC: after 9 bits of main_data_begin, 5 private bits, 4 bits of scfsi and
+/// 12 bits of part2_3_length.
+fn set_big_values(frame: &mut [u8], value: u16) {
+    for bit in 0..9 {
+        let (byte, shift) = (4 + (30 + bit) / 8, 7 - (30 + bit) % 8);
+        let set = (value >> (8 - bit) & 1) as u8;
+        frame[byte] = frame[byte] & !(1 << shift) | set << shift;
+    }
+}
+
+/// Junk with many headers decodes to nothing. The window of fixed size
+/// keeps the memory constant.
+#[test]
+fn skips_hostile_junk() {
+    // MPEG-2.5 layer II at 160 kbit/s and 8 kHz with padding: the largest
+    // frame, 2,881 bytes. The next header is never where the frame ends. The
+    // first byte keeps the first header from being trusted as a first frame.
+    let junk = [&[0][..], &[0xFF, 0xE5, 0xEA, 0x00].repeat(256 * 1024)].concat();
+    let result = stream(&junk);
+    assert!(matches!(result, Err(Error::InvalidInput(_))), "{result:?}");
+    let file = [&mpa_frames(MP2)[..3].concat(), &junk[..], MP2].concat();
+    assert_eq!(
+        stream(&file).unwrap().len(),
+        (3 + mpa_frames(MP2).len()) * 1152 * 2
+    );
+}
+
 /// As audiowaveform does, an incomplete last frame is dropped.
 #[test]
 fn cut_file_decodes_its_complete_frames() {
@@ -161,15 +301,12 @@ fn cut_file_decodes_its_complete_frames() {
 
 #[test]
 fn rejects_malformed_streams() {
-    let frames = mpa_frames(MP2);
     let cut = &MP2[..100];
-    let junk = [&frames[0][..], &[0; 10], &frames[1]].concat();
     let free_format = [0xFF, 0xFD, 0x04, 0xC4, 0, 0, 0, 0];
     let mp3_after_mp2 = [MP2, &mp3_audio_frames().concat()].concat();
     for (name, file) in [
         ("empty", &[][..]),
         ("cut inside the first frame", cut),
-        ("junk between frames", &junk),
         ("ogg", b"OggS\0\x02\0\0"),
         ("layer change", &mp3_after_mp2),
     ] {

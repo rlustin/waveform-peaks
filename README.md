@@ -140,6 +140,20 @@ arithmetic. Symphonia uses floating-point arithmetic. Thus the values from
 `MpegAudioSource` can differ by ±1 from the audiowaveform output. The length
 of the output is the same.
 
+`MpegAudioSource` reads damaged files as libmad does. It skips data between
+frames, for example junk or a tag. It also drops a frame that does not decode.
+At the start and after skipped data, libmad drops each layer III frame that
+needs main data from a frame that it did not read. `MpegAudioSource` drops the
+same frames, thus the length of the output is the same. But Symphonia must
+decode the dropped frames to fill its bit reservoir. Thus, after skipped data,
+up to one frame of the output can differ from the audiowaveform output.
+After a frame that does not decode, Symphonia empties its bit reservoir, but
+libmad keeps the data of the frame. Thus the next frames that use this data
+can also differ, up to 511 bytes of main data.
+
+Like libmad, `MpegAudioSource` looks for frames through all of the input. Thus
+input in a different format is read to the end before the error.
+
 audiowaveform does not read MPEG audio in MP4. Thus the tests compare
 `Mp4Source` with the FFmpeg decoder, with a tolerance of ±1 per sample:
 
@@ -217,6 +231,12 @@ and `ffmpeg` from Ubuntu. The tests compare:
 - MP3 and MP2 that FFmpeg encodes, with and without an Info tag: MPEG-1,
   MPEG-2 and MPEG-2.5, constant and variable bit rates, and a square wave that
   clips. The reference is audiowaveform, with a tolerance of ±1 per value;
+- damaged MP3 and MP2: junk, a frame header in junk, and an ID3v2 tag. Also
+  junk at the start and at the end, a cut start, a frame that does not
+  decode, and a cut MP2 frame. The reference is audiowaveform, and the lengths
+  must be equal. Without a bit reservoir, the tolerance is ±1 per sample.
+  With a bit reservoir, the frames after each damage can differ, as described
+  above;
 - the same MPEG audio fixtures in the same three MP4 layouts, and in
   QuickTime. The reference is the FFmpeg decoder, with a tolerance of ±1 per
   sample.
@@ -239,7 +259,10 @@ output.
   decode them, but each of its format crates needs an MPL-2.0 exception in
   `deny.toml`.
 - Symphonia does not decode the SBR and parametric stereo layers of HE-AAC.
-- `MpegAudioSource` rejects data between frames. libmad skips this data.
+- libmad drops a layer III frame if its Huffman data is longer than the
+  length in its side information. Symphonia decodes this frame. A cut frame
+  often has this problem. Then the output of `MpegAudioSource` has one frame
+  more than the audiowaveform output.
 - `MpegAudioSource` and `Mp4Source` reject free-format bit rates.
 - `Mp4Source` rejects an MP4 sample that holds more than one MPEG audio
   frame.

@@ -814,6 +814,162 @@ mod mpeg_audio_input {
         }
     }
 
+    /// The samples of a 16-bit WAV file.
+    fn wav_samples(path: &Path) -> Vec<i16> {
+        let bytes = fs::read(path).unwrap();
+        let mut at = 12;
+        loop {
+            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            if &bytes[at..at + 4] == b"data" {
+                return bytes[at + 8..at + 8 + len]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| i16::from_le_bytes(pair))
+                    .collect();
+            }
+            at += 8 + len + len % 2;
+        }
+    }
+
+    /// Damaged files: libmad skips data between frames and drops the frames
+    /// that need a bit reservoir it has not read. After skipped data, its
+    /// synthesis filter has not seen the dropped frames, so up to one frame
+    /// of output differs when frames are dropped. After a frame that does not
+    /// decode, Symphonia empties its reservoir and libmad does not, so the
+    /// frames that can use its data differ: up to 511 bytes of main data,
+    /// and one frame more for the synthesis filter.
+    #[test]
+    #[ignore = "needs audiowaveform and ffmpeg on PATH"]
+    fn damaged_mpeg_audio_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let reservoir_off = ["-reservoir", "0"];
+        let encodings = [
+            ("mp3-mono-44k1", &[][..]),
+            ("mp3-mono-44k1", &reservoir_off),
+            ("mp3-vbr-stereo-48k", &[]),
+            ("mp3-vbr-stereo-48k", &reservoir_off),
+            ("mp2-stereo-48k", &[]),
+        ];
+        for (name, extra) in encodings {
+            let fixture = FIXTURES.iter().find(|f| f.name == name).unwrap();
+            let extension = &name[..3];
+            let path = encode(
+                dir.path(),
+                fixture,
+                &[extra, &["-id3v2_version", "0"]].concat(),
+                extension,
+            );
+            let frames = common::mpa_frames(&fs::read(&path).unwrap());
+            let (third, half) = (frames.len() / 3, frames.len() / 2);
+            let fake_header = [&[0; 3][..], &frames[1][..4], &[0; 20]].concat();
+            let mut id3v2 = b"ID3\x04\0\0\0\0\0\x20".to_vec();
+            id3v2.extend([0xFF; 32]);
+            let cut = &frames[half][..frames[half].len() / 2];
+            let mut variants = vec![
+                (
+                    "junk",
+                    [
+                        frames[..third].concat(),
+                        vec![0; 10],
+                        frames[third..].concat(),
+                    ]
+                    .concat(),
+                ),
+                (
+                    "fake header",
+                    [
+                        frames[..half].concat(),
+                        fake_header,
+                        frames[half..].concat(),
+                    ]
+                    .concat(),
+                ),
+                (
+                    "ID3v2 tag",
+                    [frames[..half].concat(), id3v2, frames[half..].concat()].concat(),
+                ),
+                ("leading junk", [vec![0x55; 300], frames.concat()].concat()),
+                ("cut start", frames[third..].concat()),
+                ("trailing junk", [frames.concat(), vec![0xFF; 100]].concat()),
+            ];
+            // libmad drops a layer III frame whose Huffman data runs past its
+            // end, and Symphonia decodes it, so a cut frame is compared in
+            // layer II only (see the README limitations).
+            if extension == "mp3" {
+                // big_values above 288 in the first granule of the middle
+                // frame, after main_data_begin, the private bits, scfsi and
+                // part2_3_length.
+                let mono = fixture.channels == 1;
+                let at = 9 + if mono { 5 + 4 } else { 3 + 8 } + 12;
+                let mut corrupt = frames.clone();
+                assert_eq!(corrupt[half][1] & 1, 1, "{name}: no CRC");
+                for bit in at..at + 9 {
+                    corrupt[half][4 + bit / 8] |= 0x80 >> (bit % 8);
+                }
+                variants.push(("frame that does not decode", corrupt.concat()));
+            }
+            if extension == "mp2" {
+                variants.push((
+                    "cut frame",
+                    [&frames[..half].concat(), cut, &frames[half + 1..].concat()].concat(),
+                ));
+            }
+            for (damage, file) in variants {
+                let context = format!("{name}{extra:?}, {damage}");
+                let input = dir.path().join(format!("damaged.{extension}"));
+                fs::write(&input, &file).unwrap();
+                let output = dir.path().join("damaged.wav");
+                audiowaveform(&[
+                    "-i",
+                    input.to_str().unwrap(),
+                    "--input-format",
+                    "mp3",
+                    "-o",
+                    output.to_str().unwrap(),
+                ]);
+                let theirs = wav_samples(&output);
+                let ours =
+                    common::samples(MpegAudioSource::new(fs::File::open(&input).unwrap()).unwrap())
+                        .unwrap();
+                assert_eq!(ours.len(), theirs.len(), "{context}: sample count");
+                let channels = fixture.channels as usize;
+                let differing = ours
+                    .chunks(channels)
+                    .zip(theirs.chunks(channels))
+                    .filter(|(a, b)| {
+                        a.iter()
+                            .zip(*b)
+                            .any(|(&a, &b)| (a as i32 - b as i32).abs() > MPA_TOLERANCE)
+                    })
+                    .count();
+                let reservoir = name.starts_with("mp3") && extra.is_empty();
+                let allowed = match (reservoir, damage) {
+                    (false, _) => 0,
+                    (true, "frame that does not decode") => {
+                        let side = if fixture.channels == 1 {
+                            4 + 17
+                        } else {
+                            4 + 32
+                        };
+                        let mut main_data = 0;
+                        let reached = frames[half + 1..]
+                            .iter()
+                            .take_while(|frame| {
+                                let before = main_data;
+                                main_data += frame.len() - side;
+                                before < 511
+                            })
+                            .count();
+                        (reached + 1) * 1152
+                    }
+                    (true, _) => 1152,
+                };
+                assert!(differing <= allowed, "{context}: {differing} frames differ");
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Layout {
         FastStart,
