@@ -4,14 +4,14 @@
 
 mod common;
 
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use std::time::Duration;
 
 use common::options;
 
 use waveform_peaks::{
-    Bits, ChannelMode, DatWriter, Error, JsonWriter, Limits, MemorySink, Options, PeakBuilder,
-    RawPcmSource, generate,
+    Bits, ChannelMode, DatWriter, Error, Header, JsonWriter, Limits, MemorySink, Options,
+    PcmSource, Peak, PeakBuilder, PeakSink, RawPcmSource, generate, generate_many,
 };
 
 fn peaks(samples: &[i16], channels: u16, options: &Options) -> Vec<i16> {
@@ -238,4 +238,182 @@ fn limits_stop_oversized_input() {
         ),
         "{result:?}"
     );
+
+    // The channel count is checked before the options.
+    let mut source = RawPcmSource::new(Cursor::new(Vec::new()), 8000, 3).unwrap();
+    let zoom_one = options(1, Bits::Sixteen, ChannelMode::Mixdown);
+    let result = generate(&mut source, &zoom_one, &limits, MemorySink::new());
+    assert!(
+        matches!(
+            result,
+            Err(Error::LimitExceeded("channel count above max_channels"))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn generate_many_matches_one_run_per_output() {
+    // Three blocks of RawPcmSource, the last one partial. Zooms 3 and 1000
+    // do not divide a block, so their points span blocks.
+    let bytes = common::le_bytes(&common::pcm(40_007, 2, 7));
+    let all = [
+        options(3, Bits::Sixteen, ChannelMode::Mixdown),
+        options(1000, Bits::Eight, ChannelMode::Split),
+        options(4096, Bits::Sixteen, ChannelMode::Split),
+    ];
+    let source = || RawPcmSource::new(Cursor::new(bytes.clone()), 8000, 2).unwrap();
+
+    let outputs = all.map(|options| (options, MemorySink::new()));
+    let many = generate_many(&mut source(), &Limits::default(), outputs).unwrap();
+
+    assert_eq!(many.len(), all.len());
+    for (waveform, options) in many.iter().zip(&all) {
+        let one = generate(
+            &mut source(),
+            options,
+            &Limits::default(),
+            MemorySink::new(),
+        );
+        assert_eq!(waveform, &one.unwrap(), "{options:?}");
+    }
+}
+
+#[test]
+fn generate_many_checks_every_option_before_any_header() {
+    let mut source = RawPcmSource::new(Cursor::new(vec![0u8; 3]), 8000, 2).unwrap();
+    let (mut first, mut second) = (Vec::new(), Vec::new());
+    let outputs = [
+        (Options::default(), JsonWriter::new(&mut first)),
+        (
+            options(1, Bits::Sixteen, ChannelMode::Mixdown),
+            JsonWriter::new(&mut second),
+        ),
+    ];
+    let result = generate_many(&mut source, &Limits::default(), outputs);
+    assert!(
+        matches!(result, Err(Error::InvalidOptions(_))),
+        "{result:?}"
+    );
+    assert!(first.is_empty() && second.is_empty());
+}
+
+/// Reports what it is told and panics if read.
+struct Unread {
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl PcmSource for Unread {
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
+        panic!("source read");
+    }
+}
+
+#[test]
+fn generate_many_without_outputs_reads_nothing() {
+    let mut source = Unread {
+        sample_rate: 8000,
+        channels: 0,
+    };
+    let outputs: [(Options, MemorySink); 0] = [];
+    let result = generate_many(&mut source, &Limits::default(), outputs);
+    assert!(matches!(result.as_deref(), Ok([])), "{result:?}");
+}
+
+#[test]
+fn source_without_channels_or_rate_is_rejected() {
+    for (sample_rate, channels) in [(8000, 0), (0, 1)] {
+        let mut source = Unread {
+            sample_rate,
+            channels,
+        };
+        let result = generate(
+            &mut source,
+            &Options::default(),
+            &Limits::default(),
+            MemorySink::new(),
+        );
+        assert!(
+            matches!(result, Err(Error::InvalidOptions(_))),
+            "{sample_rate} Hz, {channels} ch: {result:?}"
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Fail {
+    Never,
+    OnPoint,
+    OnFinish,
+}
+
+/// A JSON sink that can fail on its first point or when finishing.
+struct Failing<'a> {
+    json: JsonWriter<&'a mut Vec<u8>>,
+    fail: Fail,
+}
+
+impl PeakSink for Failing<'_> {
+    type Output = ();
+
+    fn begin(&mut self, header: &Header) -> Result<(), Error> {
+        self.json.begin(header)
+    }
+
+    fn point(&mut self, peaks: &[Peak]) -> Result<(), Error> {
+        match self.fail {
+            Fail::OnPoint => Err(Error::Io(io::Error::other("point"))),
+            _ => self.json.point(peaks),
+        }
+    }
+
+    fn finish(self, length: u32) -> Result<(), Error> {
+        match self.fail {
+            Fail::OnFinish => Err(Error::Io(io::Error::other("finish"))),
+            _ => self.json.finish(length).map(drop),
+        }
+    }
+}
+
+#[test]
+fn generate_many_passes_sink_errors_through() {
+    let bytes = common::le_bytes(&common::pcm(1000, 1, 3));
+    let finished = |json: Vec<u8>| String::from_utf8(json).unwrap().ends_with("\"length\":4}");
+    for fail in [Fail::OnPoint, Fail::OnFinish] {
+        for failing_first in [false, true] {
+            let mut source = RawPcmSource::new(Cursor::new(bytes.clone()), 8000, 1).unwrap();
+            let (mut failing, mut other) = (Vec::new(), Vec::new());
+            let failing_sink = Failing {
+                json: JsonWriter::new(&mut failing),
+                fail,
+            };
+            let other_sink = Failing {
+                json: JsonWriter::new(&mut other),
+                fail: Fail::Never,
+            };
+            let sinks = if failing_first {
+                [failing_sink, other_sink]
+            } else {
+                [other_sink, failing_sink]
+            };
+            let outputs = sinks.map(|sink| (Options::default(), sink));
+            let result = generate_many(&mut source, &Limits::default(), outputs);
+            let context = format!("{fail:?}, failing first: {failing_first}");
+            assert!(matches!(result, Err(Error::Io(_))), "{context}: {result:?}");
+            // Only a sink that fails when finishing lets the sinks before it
+            // finish.
+            let expected = fail == Fail::OnFinish && !failing_first;
+            assert_eq!(finished(other), expected, "{context}");
+            assert!(!finished(failing), "{context}");
+        }
+    }
 }

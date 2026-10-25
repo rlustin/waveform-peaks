@@ -16,8 +16,12 @@
 //! because the bundled libopus build differs from audiowaveform's in the last
 //! bit (see `tests/oracle.rs`).
 //!
+//! [`generate_many`] decodes the input once for several outputs, such as
+//! several zoom levels.
+//!
 //! Points are written as they complete, so a failed run leaves a partial file
-//! behind. Write to a temporary path and rename it once [`generate`] succeeds.
+//! behind. Write to a temporary path and rename it once [`generate`] or
+//! [`generate_many`] succeeds.
 //!
 //! ```no_run
 //! # #[cfg(feature = "opus")]
@@ -100,22 +104,85 @@ pub fn generate<P: PcmSource + ?Sized, S: PeakSink>(
     limits: &Limits,
     sink: S,
 ) -> Result<S::Output, Error> {
+    let mut outputs = generate_many(source, limits, [(*options, sink)])?;
+    Ok(outputs.pop().expect("one output per sink"))
+}
+
+/// Drains `source` once into several sinks, each with its own options, and
+/// returns their outputs in the same order.
+///
+/// Decoding is most of the cost of [`generate`], so this is cheaper than one
+/// run per zoom level. Memory grows with the number of outputs, not with the
+/// input. For sinks of different types, such as [`DatWriter`] and
+/// [`JsonWriter`], wrap them in an enum that implements [`PeakSink`].
+///
+/// ```no_run
+/// # #[cfg(feature = "opus")]
+/// # fn main() -> Result<(), waveform_peaks::Error> {
+/// use std::fs::File;
+/// use waveform_peaks::{generate_many, DatWriter, Limits, OggOpusSource, Options};
+///
+/// let mut source = OggOpusSource::new(File::open("upload.opus")?)?;
+/// let mut outputs = Vec::new();
+/// for zoom in [256, 4096] {
+///     let mut options = Options::default();
+///     options.samples_per_pixel = zoom;
+///     let output = File::create(format!("upload-{zoom}.dat"))?;
+///     outputs.push((options, DatWriter::new(output)));
+/// }
+/// generate_many(&mut source, &Limits::default(), outputs)?;
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "opus"))]
+/// # fn main() {}
+/// ```
+///
+/// With no outputs, returns an empty `Vec` without reading the source.
+///
+/// # Errors
+///
+/// As for [`generate`]. Every option is checked before any sink receives its
+/// header. Sinks are finished in order: when finishing one fails, the sinks
+/// before it are finished, the sinks after it are not, and all their outputs
+/// are dropped. Thus a `.dat` file can be complete although the call fails.
+pub fn generate_many<P, S, I>(
+    source: &mut P,
+    limits: &Limits,
+    outputs: I,
+) -> Result<Vec<S::Output>, Error>
+where
+    P: PcmSource + ?Sized,
+    S: PeakSink,
+    I: IntoIterator<Item = (Options, S)>,
+{
+    let outputs: Vec<(Options, S)> = outputs.into_iter().collect();
+    if outputs.is_empty() {
+        return Ok(Vec::new());
+    }
     let channels = source.channels();
     if channels > limits.max_channels {
         return Err(Error::LimitExceeded("channel count above max_channels"));
+    }
+    for (options, _) in &outputs {
+        options.check()?;
     }
     let sample_rate = source.sample_rate();
     // Float-to-int casts saturate, so Duration::MAX means no limit.
     let max_frames = (limits.max_duration.as_secs_f64() * sample_rate as f64) as u64;
 
-    let mut builder = PeakBuilder::new(sample_rate, channels, options, sink)?;
+    let mut builders = outputs
+        .into_iter()
+        .map(|(options, sink)| PeakBuilder::new(sample_rate, channels, &options, sink))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut frames: u64 = 0;
     while let Some(block) = source.next_block()? {
         frames += (block.len() / channels as usize) as u64;
         if frames > max_frames {
             return Err(Error::LimitExceeded("duration above max_duration"));
         }
-        builder.push_interleaved(block)?;
+        for builder in &mut builders {
+            builder.push_interleaved(block)?;
+        }
     }
-    builder.finish()
+    builders.into_iter().map(PeakBuilder::finish).collect()
 }
