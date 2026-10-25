@@ -374,10 +374,11 @@ mod opus_input {
         path
     }
 
-    /// ffmpeg writes the pre-skip as the edit list's media time, and the
-    /// length in milliseconds, so the end can be up to a millisecond off the
-    /// Ogg granule position. Fragmented files get no edit list: the `dOps`
-    /// pre-skip is trimmed, but not the end padding, which is under one packet.
+    /// ffmpeg writes the pre-skip as the edit list's media time. FFmpeg 6
+    /// writes the length in milliseconds, so the end can be up to a
+    /// millisecond off the Ogg granule position. Fragmented files get no edit
+    /// list: the `dOps` pre-skip is trimmed, but not the end padding, which is
+    /// under one packet.
     #[test]
     #[ignore = "needs ffmpeg on PATH"]
     fn mp4_opus_matches_ogg_on_the_same_packets() {
@@ -458,12 +459,18 @@ mod aac_input {
     /// point and round a few samples in ten thousand differently.
     const AAC_TOLERANCE: i32 = 1;
 
+    /// The same for a signal that the encoder overshoots to about twice full
+    /// scale, where the rounding error of both decoders grows with the signal
+    /// level.
+    const OVERSHOOT_TOLERANCE: i32 = 2;
+
     struct Fixture {
         name: &'static str,
         source: &'static str,
         channels: u16,
         rate: u32,
         seconds: f64,
+        tolerance: i32,
     }
 
     const FIXTURES: &[Fixture] = &[
@@ -473,6 +480,7 @@ mod aac_input {
             channels: 1,
             rate: 44_100,
             seconds: 1.013,
+            tolerance: AAC_TOLERANCE,
         },
         Fixture {
             name: "stereo-48k-odd-length",
@@ -480,6 +488,7 @@ mod aac_input {
             channels: 2,
             rate: 48_000,
             seconds: 1.2345,
+            tolerance: AAC_TOLERANCE,
         },
         Fixture {
             name: "noise-16k",
@@ -487,6 +496,7 @@ mod aac_input {
             channels: 1,
             rate: 16_000,
             seconds: 2.1,
+            tolerance: AAC_TOLERANCE,
         },
         Fixture {
             name: "clipping-square",
@@ -494,6 +504,7 @@ mod aac_input {
             channels: 1,
             rate: 48_000,
             seconds: 1.0,
+            tolerance: OVERSHOOT_TOLERANCE,
         },
     ];
 
@@ -627,9 +638,8 @@ mod aac_input {
                     Layout::Adts | Layout::Fragmented => {
                         assert_eq!(ours.len(), theirs.len(), "{context}")
                     }
-                    // FFmpeg trims the priming but keeps the end padding,
-                    // which this crate drops. FFmpeg's edit list stores the
-                    // length in milliseconds.
+                    // Both trim by the edit list, but FFmpeg 6 keeps the end
+                    // padding, and stores the length in milliseconds.
                     Layout::FastStart | Layout::MediaFirst | Layout::Apple => {
                         let expected = fixture.seconds * rate as f64;
                         let slack = rate as f64 / 1000.0;
@@ -648,13 +658,13 @@ mod aac_input {
                     .max()
                     .unwrap_or(0);
                 assert!(
-                    worst <= AAC_TOLERANCE,
+                    worst <= fixture.tolerance,
                     "{context}: samples differ by {worst}"
                 );
                 assert_dat_matches(
                     &peaks(&ours, rate, channels),
                     &peaks(theirs, rate, channels),
-                    AAC_TOLERANCE,
+                    fixture.tolerance,
                     &context,
                 );
             }
@@ -1071,21 +1081,23 @@ mod mpeg_audio_input {
                 match layout {
                     // No edit list: both decode every frame.
                     Layout::Fragmented => assert_eq!(ours.len(), theirs.len(), "{context}"),
-                    // Both trim the start by the edit list, but FFmpeg keeps
-                    // what follows its end.
-                    // FFmpeg's edit list stores the duration in milliseconds.
-                    // For MP2 it ends the encoder delay, 481 frames, before
-                    // the end of the input.
+                    // Both trim by the edit list, but FFmpeg 6 keeps what
+                    // follows its end, and stores its duration in milliseconds.
+                    // For MP2, FFmpeg 6 ends it the encoder delay, 481 frames,
+                    // before the end of the input. FFmpeg 9 ends it with the
+                    // decoded audio, but not after the end of the input.
                     Layout::FastStart | Layout::MediaFirst | Layout::Mov => {
                         let frames = (ours.len() / channels as usize) as f64;
-                        let delay = if fixture.name.starts_with("mp2") {
-                            481.0
+                        let input = fixture.seconds * rate as f64;
+                        let ends = if fixture.name.starts_with("mp2") {
+                            let decoded = (input / 1152.0).ceil() * 1152.0 - 481.0;
+                            vec![input - 481.0, input.min(decoded)]
                         } else {
-                            0.0
+                            vec![input]
                         };
-                        let expected = fixture.seconds * rate as f64 - delay;
                         assert!(
-                            (frames - expected).abs() <= rate as f64 / 1000.0,
+                            ends.iter()
+                                .any(|end| (frames - end).abs() <= rate as f64 / 1000.0),
                             "{context}: {frames} frames"
                         );
                         assert!(ours.len() <= theirs.len(), "{context}");

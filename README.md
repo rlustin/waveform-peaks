@@ -120,20 +120,26 @@ sources with `OggOpusSource` on the same packets:
   `OggOpusSource`.
 - `Mp4Source` trims by the edit list, as the Opus in ISOBMFF specification
   tells. If there is no edit list, `Mp4Source` trims by the `dOps` pre-skip.
-- FFmpeg writes the edit list length in milliseconds. Thus the end of an
-  FFmpeg MP4 file can differ from its Ogg source by up to 1 ms. A fragmented
-  MP4 file from FFmpeg also keeps the end padding (less than one packet).
+- FFmpeg 6 writes the edit list length in milliseconds. Thus the end of an
+  FFmpeg 6 MP4 file can differ from its Ogg source by up to 1 ms. FFmpeg 9
+  writes the length in samples. A fragmented MP4 file from FFmpeg also keeps
+  the end padding (less than one packet).
 
 audiowaveform does not read AAC. Thus the tests compare AAC output with the
 FFmpeg decoder, with a tolerance of ±1 per sample:
 
 - `Mp4Source` trims the encoder priming and padding by the MP4 edit list. If
-  there is no edit list, `Mp4Source` uses the Apple `iTunSMPB` tag. FFmpeg
-  trims only the priming.
+  there is no edit list, `Mp4Source` uses the Apple `iTunSMPB` tag. FFmpeg 6
+  trims only the priming. FFmpeg 9 also trims the padding.
 - An ADTS stream records neither value, so `AdtsAacSource` trims nothing.
 - Symphonia decodes only AAC-LC. For HE-AAC input, Symphonia decodes only the
   AAC-LC core. The output has half the sample rate, and does not have the
   upper part of the spectrum.
+
+The AAC tests also use a square wave that clips. The FFmpeg 9 encoder makes
+this square wave go to approximately two times full scale. The rounding error
+of the two decoders increases with the signal level. Thus the tolerance for
+this square wave is ±2.
 
 audiowaveform decodes MPEG audio with libmad, which uses fixed-point
 arithmetic. Symphonia uses floating-point arithmetic. Thus the values from
@@ -157,9 +163,13 @@ input in a different format is read to the end before the error.
 audiowaveform does not read MPEG audio in MP4. Thus the tests compare
 `Mp4Source` with the FFmpeg decoder, with a tolerance of ±1 per sample:
 
-- `Mp4Source` trims by the MP4 edit list. FFmpeg trims only the start.
-- FFmpeg writes an edit list for MP2 in MP4. This edit list ends 481 frames
-  before the end of the input.
+- `Mp4Source` trims by the MP4 edit list. FFmpeg 6 trims only the start.
+  FFmpeg 9 also trims the end.
+- FFmpeg writes an edit list for MP2 in MP4. With FFmpeg 6, this edit list
+  ends 481 frames before the end of the input. With FFmpeg 9, the edit list
+  ends at the end of the decoded audio. FFmpeg does not encode a frame for the
+  encoder delay, thus this end can be up to 481 frames before the end of the
+  input.
 - An MPEG audio stream does not record the MP2 encoder delay. Thus
   `MpegAudioSource` trims nothing from MP2, as audiowaveform does.
 
