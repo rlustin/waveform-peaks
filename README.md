@@ -11,12 +11,16 @@ let output = File::create("upload.dat")?;
 generate(&mut source, &Options::default(), &Limits::default(), DatWriter::new(output))?;
 ```
 
-`generate` checks each block against `Limits` (channel count and duration)
-when the block arrives.
+To make peaks at several zoom levels, use `generate_many`. `generate_many`
+decodes the input one time and sends each block to all of the outputs. Each
+output has its own `Options` and sink.
 
-`generate` writes each point as soon as the point is complete. If the run
-fails, the output file is incomplete. Thus, write to a temporary path, and
-rename the file only when `generate` succeeds.
+`generate` and `generate_many` check the channel count against `Limits` before
+they decode. They check the duration when each block arrives.
+
+`generate` and `generate_many` write each point as soon as the point is
+complete. If the run fails, an output file can be incomplete. Thus, write each
+output to a temporary path. Rename the files only when the run succeeds.
 
 `DatWriter` needs an output that implements `Seek`, because it writes the
 length field of the header last. `JsonWriter` writes `length` after `data`, so
@@ -280,7 +284,6 @@ output.
   this combination: they record AAC in MP4 only.
 - `WebmOpusSource` skips compressed and encrypted tracks. For a file with
   several segments, `WebmOpusSource` decodes only the first segment.
-- One run makes peaks at one zoom level only.
 - Opus decoding always needs libopus: there is no pure-Rust Opus decoder
   option.
 

@@ -68,11 +68,7 @@ impl<S: PeakSink> PeakBuilder<S> {
         options: &Options,
         mut sink: S,
     ) -> Result<Self, Error> {
-        if options.samples_per_pixel < 2 {
-            return Err(Error::InvalidOptions(
-                "samples_per_pixel must be at least 2",
-            ));
-        }
+        options.check()?;
         if sample_rate == 0 {
             return Err(Error::InvalidOptions("sample_rate must be positive"));
         }

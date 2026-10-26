@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::Error;
+
 /// Output sample width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Bits {
@@ -35,6 +37,17 @@ pub struct Options {
     pub channel_mode: ChannelMode,
 }
 
+impl Options {
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        if self.samples_per_pixel < 2 {
+            return Err(Error::InvalidOptions(
+                "samples_per_pixel must be at least 2",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for Options {
     /// The audiowaveform defaults: zoom 256, 16 bits, mixdown.
     fn default() -> Self {
@@ -46,7 +59,8 @@ impl Default for Options {
     }
 }
 
-/// Bounds for untrusted input, enforced by [`generate`](crate::generate).
+/// Bounds for untrusted input, enforced by [`generate`](crate::generate) and
+/// [`generate_many`](crate::generate_many).
 ///
 /// Memory use does not depend on the input length, so these bound CPU time and
 /// output size rather than memory.

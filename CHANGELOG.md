@@ -6,6 +6,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `generate_many` makes peaks for several outputs, such as several zoom
+  levels, in one pass over the input, so the input is decoded only once.
+
 ### Changed
 
 - `MpegAudioSource` reads damaged files as audiowaveform does, instead of
