@@ -13,6 +13,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `Mp4Source::new_seekable` seeks past the samples of other tracks and other
+  boxes, when they take 64 KiB or more, instead of reading through them, so
+  the video of a phone recording is not read. It reads the input length when
+  it starts, so the file must not grow while it is read: data past that
+  length is a truncated box. On an input that cannot seek, such as a pipe,
+  it still reads a file with the `moov` box first.
 - `MpegAudioSource` reads damaged files as audiowaveform does, instead of
   returning `Error::InvalidInput`. It skips data between frames and before
   the first frame, such as junk or an ID3 tag, and drops a frame that does

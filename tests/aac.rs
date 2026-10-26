@@ -5,7 +5,13 @@
 
 mod common;
 
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
+use std::thread;
 
 use common::*;
 use waveform_peaks::{AdtsAacSource, Error, Mp4Options, Mp4Source, PcmSource};
@@ -313,6 +319,210 @@ fn seekable_reads_media_data_before_moov() {
     let udta = itunsmpb_udta(PRIMING as u32, 0, MONO_LENGTH, false);
     let file = media_first_mp4(&[mono_track(10)], 1000, &udta);
     assert_eq!(seekable(file).unwrap().len() as u64, MONO_LENGTH);
+}
+
+/// Counts the bytes read and the seeks, and fails every seek unless
+/// `can_seek`.
+struct Counted<R> {
+    inner: R,
+    read: usize,
+    seeks: usize,
+    can_seek: bool,
+}
+
+impl<R> Counted<R> {
+    fn new(inner: R, can_seek: bool) -> Self {
+        Counted {
+            inner,
+            read: 0,
+            seeks: 0,
+            can_seek,
+        }
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.read += read;
+        Ok(read)
+    }
+}
+
+impl<R: Seek> Seek for Counted<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.seeks += 1;
+        if !self.can_seek {
+            return Err(io::ErrorKind::NotSeekable.into());
+        }
+        self.inner.seek(position)
+    }
+}
+
+fn video_track(chunks: Vec<usize>) -> Mp4Track {
+    Mp4Track {
+        id: 2,
+        handler: *b"vide",
+        sample_entry: mp4_box(b"avc1", &[0; 78]),
+        timescale: 90_000,
+        edit: None,
+        chunks: chunks
+            .into_iter()
+            .map(|len| vec![vec![0xEE; len]])
+            .collect(),
+        wide_offsets: false,
+        quicktime: false,
+    }
+}
+
+/// Seeks past the other tracks rather than reading them, which matters for
+/// the video of a phone recording.
+#[test]
+fn seekable_seeks_past_other_tracks() {
+    let tracks = [video_track(vec![200_000; 10]), mono_track(6)];
+    for file in [
+        media_first_mp4(&tracks, 1000, &[]),
+        faststart_mp4(&tracks, 1000, &[], &[]),
+    ] {
+        let mut reader = Counted::new(Cursor::new(&file), true);
+        let source = Mp4Source::new_seekable(&mut reader).unwrap();
+        assert_same(&samples(source).unwrap(), &adts(MONO));
+        assert!(reader.read < file.len() / 10, "{} bytes read", reader.read);
+    }
+
+    // A seek past the end fails as reading through would.
+    let file = faststart_mp4(&tracks, 1000, &[], &[]);
+    let last_video = file.windows(4).rposition(|w| w == [0xEE; 4]).unwrap();
+    let result = seekable(file[..last_video].to_vec());
+    assert!(
+        matches!(&result, Err(Error::InvalidInput(m)) if m.contains("truncated")),
+        "{result:?}"
+    );
+
+    // Also when the file starts after other data, and the cut is in data
+    // that is only skipped.
+    let mut chunks = vec![1000; 7];
+    chunks.push(200_000);
+    let tracks = [mono_track(6), video_track(chunks)];
+    let prefix = vec![0xAB; 1000];
+    let file = [&prefix[..], &faststart_mp4(&tracks, 1000, &[], &[])].concat();
+    let mut reader = Cursor::new(&file[..file.len() - 3]);
+    reader.seek(SeekFrom::Start(prefix.len() as u64)).unwrap();
+    let result = Mp4Source::new_seekable(reader).and_then(samples);
+    assert!(
+        matches!(&result, Err(Error::InvalidInput(m)) if m.contains("truncated")),
+        "{result:?}"
+    );
+}
+
+/// Short skips read through, so that a reader over the network does not make
+/// a request for each chunk of another track.
+#[test]
+fn seekable_reads_through_short_skips() {
+    let tracks = [video_track(vec![10_000; 10]), mono_track(6)];
+    let file = faststart_mp4(&tracks, 1000, &[], &[]);
+    let mut reader = Counted::new(Cursor::new(&file), true);
+    let source = Mp4Source::new_seekable(&mut reader).unwrap();
+    assert_same(&samples(source).unwrap(), &adts(MONO));
+    // Only the seeks that measure the input.
+    assert_eq!(reader.seeks, 3);
+}
+
+/// Seeks as a Windows pipe does: without an error, but neither seeking nor
+/// reading moves it, and its end is the data waiting in it.
+struct WindowsPipe<R> {
+    inner: R,
+    position: u64,
+}
+
+impl<R: Read> Read for WindowsPipe<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R> Seek for WindowsPipe<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.position = match position {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::End(offset) => 4096_u64.saturating_add_signed(offset),
+            SeekFrom::Current(offset) => self.position.saturating_add_signed(offset),
+        };
+        Ok(self.position)
+    }
+}
+
+#[test]
+fn seekable_reads_through_an_input_that_only_says_it_seeks() {
+    let mut chunks = vec![1000; 7];
+    chunks.push(200_000);
+    for tracks in [
+        [video_track(vec![100_000; 10]), mono_track(6)],
+        // The mdat box is then made open-ended, so the only long skip is to
+        // its end.
+        [mono_track(6), video_track(chunks)],
+    ] {
+        let mut file = faststart_mp4(&tracks, 1000, &[], &[]);
+        if tracks[0].handler == *b"soun" {
+            let mdat = file.windows(4).rposition(|w| w == b"mdat").unwrap() - 4;
+            file[mdat..mdat + 4].copy_from_slice(&0u32.to_be_bytes());
+        }
+        let reader = WindowsPipe {
+            inner: Cursor::new(&file),
+            position: 0,
+        };
+        let source = Mp4Source::new_seekable(reader).unwrap();
+        assert_same(&samples(source).unwrap(), &adts(MONO));
+    }
+}
+
+/// A pipe opened as a file is `Seek`, but cannot seek.
+#[test]
+fn seekable_reads_a_fast_start_file_from_a_pipe() {
+    let tracks = [video_track(vec![100_000; 10]), mono_track(6)];
+    let file = faststart_mp4(&tracks, 1000, &[], &[]);
+    let (reader, mut writer) = io::pipe().unwrap();
+    let writing = thread::spawn({
+        let file = file.clone();
+        move || writer.write_all(&file)
+    });
+    #[cfg(unix)]
+    let reader = File::from(OwnedFd::from(reader));
+    #[cfg(windows)]
+    let reader = File::from(OwnedHandle::from(reader));
+    let decoded = samples(Mp4Source::new_seekable(reader).unwrap()).unwrap();
+    writing.join().unwrap().unwrap();
+    assert_same(&decoded, &adts(MONO));
+}
+
+/// An open-ended mdat box runs to the end of the file, past the last audio
+/// sample.
+#[test]
+fn seekable_seeks_to_the_end_of_an_open_ended_mdat() {
+    let mut chunks = vec![1000; 7];
+    chunks.push(2_000_000);
+    let tracks = [mono_track(6), video_track(chunks)];
+    let mut file = faststart_mp4(&tracks, 1000, &[], &[]);
+    let mdat = file.windows(4).rposition(|w| w == b"mdat").unwrap() - 4;
+    file[mdat..mdat + 4].copy_from_slice(&0u32.to_be_bytes());
+
+    let mut reader = Counted::new(Cursor::new(&file), true);
+    let source = Mp4Source::new_seekable(&mut reader).unwrap();
+    assert_same(&samples(source).unwrap(), &adts(MONO));
+    assert!(reader.read < 100_000, "{} bytes read", reader.read);
+}
+
+/// An input that is `Seek`, but whose seeks all fail.
+#[test]
+fn seekable_reads_through_an_input_that_cannot_seek() {
+    let tracks = [video_track(vec![1000; 10]), mono_track(6)];
+    let file = faststart_mp4(&tracks, 1000, &[], &[]);
+    let source = Mp4Source::new_seekable(Counted::new(Cursor::new(&file), false)).unwrap();
+    assert_same(&samples(source).unwrap(), &adts(MONO));
+
+    let file = media_first_mp4(&tracks, 1000, &[]);
+    let result = Mp4Source::new_seekable(Counted::new(Cursor::new(&file), false));
+    assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
 }
 
 #[test]
