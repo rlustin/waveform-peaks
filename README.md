@@ -55,7 +55,9 @@ in MP4.
 FFmpeg and phones write the media data before the `moov` box by default. To
 read this layout, use `Mp4Source::new_seekable` on an input that implements
 `Seek`, for example an upload saved to disk. `new_seekable` also reads the two
-other layouts.
+other layouts. `new_seekable` seeks past the data of other tracks, such as
+video, and does not read this data. The file must not grow while
+`new_seekable` reads it.
 
 ## Memory use
 

@@ -74,7 +74,8 @@ impl Default for Mp4Options {
 /// audio track, which a non-fragmented file stores in its `moov` box (4 bytes
 /// per sample, about 700 KB per hour of AAC at 48 kHz), or the current
 /// `moof` box of a fragmented one. Other tracks and metadata, such as cover
-/// art, are read past without being buffered. Both are bounded by
+/// art, are read past without being buffered, or seeked past by
+/// [`new_seekable`](Self::new_seekable). Both are bounded by
 /// [`Mp4Options::max_table_bytes`].
 ///
 /// Trims the encoder priming and padding given by the track's edit list.
@@ -265,12 +266,17 @@ impl<R: Read + Seek> Mp4Source<R> {
     /// comes before it, then seeks back to the start of that media data. The
     /// MP4 file starts at the current position of `reader`.
     ///
+    /// Seeks past what it does not decode, such as the samples of a video
+    /// track, so the file must not grow while it is read. If `reader` cannot
+    /// seek, as for a pipe, a file with the `moov` box first is read through.
+    ///
     /// # Errors
     ///
     /// As for [`with_options`](Self::with_options), except that media data
     /// before the `moov` box is read, and [`Error::Io`] when seeking fails.
     pub fn seekable_with_options(reader: R, options: Mp4Options) -> Result<Self, Error> {
         let mut reader = BoxReader::new(reader);
+        reader.input.seek_to_skip()?;
         let mut media_start = None;
         let movie = read_to_movie(
             &mut reader,

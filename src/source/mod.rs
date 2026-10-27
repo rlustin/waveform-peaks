@@ -21,7 +21,7 @@ mod webm_opus;
 
 use std::fmt;
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
-use std::io::{self, BufReader, Seek};
+use std::io::{self, BufReader, Seek, SeekFrom};
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "aac")]
@@ -199,6 +199,26 @@ pub(crate) struct CountingReader<R> {
     position: u64,
     /// Error message for input that ends inside a structure.
     truncated: &'static str,
+    /// Set by [`seek_to_skip`](Self::seek_to_skip).
+    seeker: Option<Seeker<R>>,
+}
+
+/// Shorter skips read through: a reader over the network may make a request
+/// for each seek.
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
+const MIN_SEEK: u64 = 64 * 1024;
+
+/// Lets a reader of any type skip by seeking, once it is known to be `Seek`.
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
+struct Seeker<R> {
+    /// Input length, counted like [`CountingReader::position`].
+    len: u64,
+    /// Where the input starts in the underlying reader.
+    start: u64,
+    /// Whether reading was seen to move the underlying reader.
+    checked: bool,
+    seek_relative: fn(&mut BufReader<R>, i64) -> io::Result<()>,
+    stream_position: fn(&mut R) -> io::Result<u64>,
 }
 
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
@@ -208,6 +228,7 @@ impl<R: Read> CountingReader<R> {
             reader: BufReader::new(reader),
             position: 0,
             truncated,
+            seeker: None,
         }
     }
 
@@ -231,6 +252,20 @@ impl<R: Read> CountingReader<R> {
     }
 
     pub(crate) fn skip(&mut self, len: u64) -> Result<(), Error> {
+        if len >= MIN_SEEK
+            && let Some((input_len, seek_relative)) = self
+                .checked_seeker()
+                .map(|seeker| (seeker.len, seeker.seek_relative))
+        {
+            // Past the end, reading through would fail too.
+            if len > input_len.saturating_sub(self.position) {
+                return Err(invalid(self.truncated));
+            }
+            let offset = i64::try_from(len).map_err(|_| invalid("offset out of range"))?;
+            seek_relative(&mut self.reader, offset)?;
+            self.position += len;
+            return Ok(());
+        }
         let skipped = io::copy(&mut (&mut self.reader).take(len), &mut io::sink())?;
         self.position += skipped;
         if skipped < len {
@@ -240,8 +275,28 @@ impl<R: Read> CountingReader<R> {
     }
 
     pub(crate) fn skip_to_end(&mut self) -> Result<(), Error> {
+        if let Some(len) = self.checked_seeker().map(|seeker| seeker.len) {
+            return self.skip(len.saturating_sub(self.position));
+        }
         self.position += io::copy(&mut self.reader, &mut io::sink())?;
         Ok(())
+    }
+
+    /// The seeker, once the underlying reader is seen to be at the end of
+    /// what was read from it. A Windows pipe seeks without an error, but
+    /// neither seeking nor reading moves it, and its end is the data waiting
+    /// in it: it is then read through.
+    fn checked_seeker(&mut self) -> Option<&Seeker<R>> {
+        let seeker = self.seeker.as_mut()?;
+        if !seeker.checked {
+            let read = seeker.start + self.position + self.reader.buffer().len() as u64;
+            if (seeker.stream_position)(self.reader.get_mut()).ok() != Some(read) {
+                self.seeker = None;
+                return None;
+            }
+            seeker.checked = true;
+        }
+        self.seeker.as_ref()
     }
 }
 
@@ -255,6 +310,29 @@ impl<R: Read + Seek> CountingReader<R> {
             .map_err(|_| invalid("offset out of range"))?;
         self.reader.seek_relative(offset)?;
         self.position = position;
+        Ok(())
+    }
+
+    /// Makes [`skip`](Self::skip) and [`skip_to_end`](Self::skip_to_end) seek
+    /// past long spans instead of reading through. The input must not grow
+    /// afterwards.
+    pub(crate) fn seek_to_skip(&mut self) -> Result<(), Error> {
+        // A Unix pipe opened as a file is `Seek` but cannot seek: it still
+        // reads a fast-start file through.
+        let Ok(current) = self.reader.stream_position() else {
+            return Ok(());
+        };
+        let Ok(end) = self.reader.seek(SeekFrom::End(0)) else {
+            return Ok(());
+        };
+        self.reader.seek(SeekFrom::Start(current))?;
+        self.seeker = Some(Seeker {
+            len: self.position + end.saturating_sub(current),
+            start: current.saturating_sub(self.position),
+            checked: false,
+            seek_relative: BufReader::seek_relative,
+            stream_position: R::stream_position,
+        });
         Ok(())
     }
 }
