@@ -71,6 +71,71 @@ Peak memory use for a one-hour stereo Opus file, in Ogg or WebM:
 audiowaveform keeps all of the output in memory, so its memory use increases
 when the zoom decreases.
 
+## Frequency bands
+
+To colour a waveform by its spectrum, set `Options::bands` to a `Crossover`.
+Then each point also gets the level of a low, a mid and a high frequency band.
+The default crossover frequencies are 200 Hz and 2 kHz.
+
+![Waveform coloured by band level: red for low, green for mid, blue for high](docs/bands.png)
+
+The image shows one possible rendering of 16 seconds of a dance track, before
+and after a drop. The red bars are kick drums. The colour of each bar is the
+mix of the three levels, with red for low, green for mid and blue for high.
+Each band has a weight of 1 divided by the square root of its highest level.
+The height of each bar is √(low² + mid² + high²). The crate does not draw
+images: a player draws them from the levels.
+
+```rust
+let mut options = Options::default();
+options.bands = Some(Crossover::default());
+let peaks = DatWriter::new(File::create("upload.dat")?);
+let sink = BandJsonWriter::new(peaks, File::create("upload.bands.json")?);
+generate(&mut source, &options, &Limits::default(), sink)?;
+```
+
+`BandJsonWriter` sends the peaks to a different sink, for example `DatWriter`.
+Thus the peak file is the same as a peak file without bands. `BandJsonWriter`
+writes the band levels to a separate JSON file. The crate documentation
+describes the format of this file.
+
+If you wrap a sink, for example in an enum for `generate_many`, forward
+`PeakSink::point_with_bands`. Otherwise the default implementation drops the
+band levels. With `generate_many`, each output that sets `Options::bands` runs
+its own filters.
+
+The levels are root mean square values on the 16-bit sample scale. The levels
+are absolute: most audio has less energy in the high band than in the low band.
+Thus, give each band a weight before you draw the bands. A weight of 1 divided
+by the highest level of the band makes sections where all bands play look pale.
+A weaker weight, such as 1 divided by the square root of the highest level,
+keeps more contrast.
+
+The player decides how to draw the bands. DJ software uses two methods:
+
+- Colour each bar by the mix of the three levels. For example, use red for the
+  low band, green for the mid band and blue for the high band.
+- Draw one envelope for each band, with a height equal to the level of the band.
+  At each point, draw the largest envelope first, so that it does not hide the
+  smaller envelopes.
+
+The levels are linear. To show the quiet parts of a file better, apply a
+logarithmic or gamma scale to the levels.
+
+For a loud master, the peaks are near full scale in most of the file. Then the
+waveform shape does not show the structure of the track. To show the structure,
+set the height of each bar from the band levels, not from the peaks. For
+example, use √(low² + mid² + high²). This value is approximately the root mean
+square level of the point.
+
+The high band contains only the frequencies below half the decoded sample rate.
+Symphonia decodes only the AAC-LC core of HE-AAC, so for HE-AAC the high band
+has less energy.
+
+The band filters do not increase the memory use. For a one-hour stereo Opus
+file, they increase the CPU time by approximately 30% with mixdown. With split
+channels, the increase is approximately 50%.
+
 ## Features
 
 The default `opus` feature decodes Opus from Ogg, WebM and MP4 with libopus.

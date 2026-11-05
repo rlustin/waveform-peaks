@@ -19,6 +19,10 @@
 //! [`generate_many`] decodes the input once for several outputs, such as
 //! several zoom levels.
 //!
+//! With [`Options::bands`], each point also gets the level of a low, a mid and
+//! a high frequency band, which [`BandJsonWriter`] writes next to the peaks,
+//! for example to colour the waveform by its spectrum.
+//!
 //! Points are written as they complete, so a failed run leaves a partial file
 //! behind. Write to a temporary path and rename it once [`generate`] or
 //! [`generate_many`] succeeds.
@@ -65,16 +69,18 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod bands;
 mod builder;
 mod error;
 mod options;
 mod sink;
 pub mod source;
 
+pub use bands::{Bands, Crossover};
 pub use builder::{Header, Peak, PeakBuilder};
 pub use error::Error;
 pub use options::{Bits, ChannelMode, Limits, Options};
-pub use sink::{DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
+pub use sink::{BandJsonWriter, DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
 #[cfg(feature = "aac")]
 pub use source::AdtsAacSource;
 #[cfg(feature = "aac")]
@@ -114,7 +120,11 @@ pub fn generate<P: PcmSource + ?Sized, S: PeakSink>(
 /// Decoding is most of the cost of [`generate`], so this is cheaper than one
 /// run per zoom level. Memory grows with the number of outputs, not with the
 /// input. For sinks of different types, such as [`DatWriter`] and
-/// [`JsonWriter`], wrap them in an enum that implements [`PeakSink`].
+/// [`JsonWriter`], wrap them in an enum that implements [`PeakSink`] and
+/// forwards every method, including [`PeakSink::point_with_bands`].
+///
+/// With [`Options::bands`], each output runs its own filters, so their cost
+/// is paid once per output that sets it.
 ///
 /// ```no_run
 /// # #[cfg(feature = "opus")]

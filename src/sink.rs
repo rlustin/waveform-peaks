@@ -1,9 +1,15 @@
 use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 
-use crate::{Bits, Error, Header, Peak};
+use crate::{Bands, Bits, Error, Header, Peak};
 
 /// Receives the header, then each point as soon as it completes, then the
 /// final point count.
+///
+/// A sink that wraps another sink, such as an enum for
+/// [`generate_many`](crate::generate_many), must forward
+/// [`point_with_bands`](Self::point_with_bands) as well as
+/// [`point`](Self::point). Otherwise the default implementation drops the
+/// band levels.
 pub trait PeakSink {
     /// Value returned by [`finish`](Self::finish).
     type Output;
@@ -22,6 +28,18 @@ pub trait PeakSink {
     ///
     /// As for [`begin`](Self::begin).
     fn point(&mut self, peaks: &[Peak]) -> Result<(), Error>;
+
+    /// Called instead of [`point`](Self::point) when
+    /// [`Options::bands`](crate::Options::bands) is set, with one [`Bands`]
+    /// per output channel. The default drops the levels and calls `point`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`begin`](Self::begin).
+    fn point_with_bands(&mut self, peaks: &[Peak], bands: &[Bands]) -> Result<(), Error> {
+        let _ = bands;
+        self.point(peaks)
+    }
 
     /// Called once, after the last point, with the number of points.
     ///
@@ -164,9 +182,108 @@ impl<W: Write> PeakSink for JsonWriter<W> {
     }
 }
 
+/// Passes the peaks to another sink, and writes the band levels as JSON.
+///
+/// Thus the peaks keep an audiowaveform format, which players such as
+/// peaks.js read, and a second file gives the colour of each point. The
+/// band output is:
+///
+/// ```json
+/// {"version":1,"channels":1,"sample_rate":48000,"samples_per_pixel":256,
+///  "crossover_hz":[200,2000],"data":[low,mid,high,...],"length":1234}
+/// ```
+///
+/// `data` holds the [`Bands`] of each point, then of each output channel. The
+/// levels are absolute. Most audio has less energy in the high band, so
+/// weight each band before drawing. Dividing by the highest level of the band
+/// makes sections where all bands play look pale; dividing by its square root
+/// keeps more contrast. The levels are linear: a logarithmic or gamma scale shows quiet parts
+/// better. Players either colour each bar by the mix of the three levels, or
+/// draw one envelope per band, the largest first so it does not hide the
+/// others. On a loud master the peaks stay near full scale, so a bar height of
+/// √(low² + mid² + high²), about the RMS level of the point, shows the
+/// structure better.
+///
+/// [`begin`](PeakSink::begin) returns [`Error::InvalidOptions`] if
+/// [`Options::bands`](crate::Options::bands) is `None`. If generation fails,
+/// both outputs are truncated.
+#[derive(Debug)]
+pub struct BandJsonWriter<S, W: Write> {
+    peaks: S,
+    inner: BufWriter<W>,
+    first: bool,
+}
+
+impl<S: PeakSink, W: Write> BandJsonWriter<S, W> {
+    /// Sends the peaks to `peaks` and writes the bands to `bands`. Writes to
+    /// `bands` are buffered internally.
+    pub fn new(peaks: S, bands: W) -> Self {
+        BandJsonWriter {
+            peaks,
+            inner: BufWriter::new(bands),
+            first: true,
+        }
+    }
+}
+
+const BANDS_REQUIRED: Error = Error::InvalidOptions("BandJsonWriter needs Options::bands");
+
+impl<S: PeakSink, W: Write> PeakSink for BandJsonWriter<S, W> {
+    /// The output of the peak sink, and the band output.
+    type Output = (S::Output, W);
+
+    fn begin(&mut self, header: &Header) -> Result<(), Error> {
+        let Some(crossover) = header.bands else {
+            return Err(BANDS_REQUIRED);
+        };
+        self.peaks.begin(header)?;
+        write!(
+            self.inner,
+            r#"{{"version":1,"channels":{},"sample_rate":{},"samples_per_pixel":{},"crossover_hz":[{},{}],"data":["#,
+            header.channels,
+            header.sample_rate,
+            header.samples_per_pixel,
+            crossover.low_hz,
+            crossover.high_hz
+        )?;
+        Ok(())
+    }
+
+    fn point(&mut self, _peaks: &[Peak]) -> Result<(), Error> {
+        Err(Error::InvalidOptions(
+            "BandJsonWriter got a point without bands: a wrapping sink must forward point_with_bands",
+        ))
+    }
+
+    fn point_with_bands(&mut self, peaks: &[Peak], bands: &[Bands]) -> Result<(), Error> {
+        self.peaks.point_with_bands(peaks, bands)?;
+        for level in bands {
+            let separator = if self.first { "" } else { "," };
+            self.first = false;
+            write!(
+                self.inner,
+                "{separator}{},{},{}",
+                level.low, level.mid, level.high
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, length: u32) -> Result<Self::Output, Error> {
+        let peaks = self.peaks.finish(length)?;
+        write!(self.inner, r#"],"length":{length}}}"#)?;
+        let bands = self
+            .inner
+            .into_inner()
+            .map_err(|err| Error::Io(err.into_error()))?;
+        Ok((peaks, bands))
+    }
+}
+
 /// Collects the waveform in memory.
 ///
-/// Output size is `length × channels × 2` values, so prefer [`DatWriter`] or
+/// Output size is `length × channels × 2` values, plus `length × channels`
+/// [`Bands`] with [`Options::bands`](crate::Options::bands), so prefer [`DatWriter`] or
 /// [`JsonWriter`] for long inputs at fine zoom levels.
 ///
 /// # Panics
@@ -178,6 +295,7 @@ impl<W: Write> PeakSink for JsonWriter<W> {
 pub struct MemorySink {
     header: Option<Header>,
     data: Vec<i16>,
+    bands: Vec<Bands>,
 }
 
 impl MemorySink {
@@ -204,6 +322,11 @@ impl PeakSink for MemorySink {
         Ok(())
     }
 
+    fn point_with_bands(&mut self, peaks: &[Peak], bands: &[Bands]) -> Result<(), Error> {
+        self.bands.extend_from_slice(bands);
+        self.point(peaks)
+    }
+
     fn finish(self, length: u32) -> Result<Waveform, Error> {
         let header = self
             .header
@@ -212,6 +335,7 @@ impl PeakSink for MemorySink {
             header,
             length,
             data: self.data,
+            bands: self.bands,
         })
     }
 }
@@ -222,6 +346,7 @@ pub struct Waveform {
     header: Header,
     length: u32,
     data: Vec<i16>,
+    bands: Vec<Bands>,
 }
 
 impl Waveform {
@@ -241,6 +366,13 @@ impl Waveform {
     #[must_use]
     pub fn data(&self) -> &[i16] {
         &self.data
+    }
+
+    /// Band levels, interleaved by point, then channel. Empty unless
+    /// [`Options::bands`](crate::Options::bands) is set.
+    #[must_use]
+    pub fn bands(&self) -> &[Bands] {
+        &self.bands
     }
 
     /// Takes [`data`](Self::data) without copying it.
