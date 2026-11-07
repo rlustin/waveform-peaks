@@ -961,3 +961,59 @@ pub fn itunsmpb_udta(priming: u32, padding: u32, length: u64, iso_meta: bool) ->
     };
     mp4_box(b"udta", &meta)
 }
+
+/// A RIFF chunk, with its pad byte if `body` has an odd length.
+pub fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut chunk = [id.as_slice(), &(body.len() as u32).to_le_bytes(), body].concat();
+    if body.len() % 2 == 1 {
+        chunk.push(0);
+    }
+    chunk
+}
+
+/// A WAV file made of `chunks`, with the RIFF size of their total length.
+pub fn wav_file(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let chunks = chunks.concat();
+    [
+        b"RIFF".as_slice(),
+        &(chunks.len() as u32 + 4).to_le_bytes(),
+        b"WAVE",
+        &chunks,
+    ]
+    .concat()
+}
+
+/// A 16-byte `fmt ` chunk body.
+pub fn wav_fmt(tag: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+    let block_align = bits.div_ceil(8) * channels;
+    [
+        tag.to_le_bytes().as_slice(),
+        &channels.to_le_bytes(),
+        &rate.to_le_bytes(),
+        &(rate * block_align as u32).to_le_bytes(),
+        &block_align.to_le_bytes(),
+        &bits.to_le_bytes(),
+    ]
+    .concat()
+}
+
+/// A 40-byte `WAVE_FORMAT_EXTENSIBLE` `fmt ` chunk body for `sub_tag`.
+pub fn wav_fmt_extensible(sub_tag: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+    let mut fmt = wav_fmt(0xFFFE, channels, rate, bits);
+    fmt.extend(22u16.to_le_bytes());
+    fmt.extend(bits.to_le_bytes());
+    fmt.extend(0u32.to_le_bytes());
+    fmt.extend((sub_tag as u32).to_le_bytes());
+    fmt.extend([
+        0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+    ]);
+    fmt
+}
+
+/// A WAV file with a `fmt ` chunk and a `data` chunk.
+pub fn wav(tag: u16, channels: u16, rate: u32, bits: u16, data: &[u8]) -> Vec<u8> {
+    wav_file(&[
+        riff_chunk(b"fmt ", &wav_fmt(tag, channels, rate, bits)),
+        riff_chunk(b"data", data),
+    ])
+}
