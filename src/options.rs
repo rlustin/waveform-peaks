@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::Error;
+use crate::{Crossover, Error};
 
 /// Output sample width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +35,13 @@ pub struct Options {
     pub bits: Bits,
     /// Channel mapping.
     pub channel_mode: ChannelMode,
+    /// Also measures the level of three frequency bands for each point and
+    /// output channel, for example to colour a waveform by its spectrum.
+    /// `None`, the default, does not filter. Only sinks that implement
+    /// [`PeakSink::point_with_bands`](crate::PeakSink::point_with_bands)
+    /// keep the levels: [`DatWriter`](crate::DatWriter) and
+    /// [`JsonWriter`](crate::JsonWriter) ignore them.
+    pub bands: Option<Crossover>,
 }
 
 impl Options {
@@ -44,17 +51,21 @@ impl Options {
                 "samples_per_pixel must be at least 2",
             ));
         }
+        if let Some(crossover) = &self.bands {
+            crossover.check()?;
+        }
         Ok(())
     }
 }
 
 impl Default for Options {
-    /// The audiowaveform defaults: zoom 256, 16 bits, mixdown.
+    /// The audiowaveform defaults: zoom 256, 16 bits, mixdown, and no bands.
     fn default() -> Self {
         Options {
             samples_per_pixel: 256,
             bits: Bits::Sixteen,
             channel_mode: ChannelMode::Mixdown,
+            bands: None,
         }
     }
 }

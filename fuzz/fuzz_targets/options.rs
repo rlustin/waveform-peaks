@@ -1,4 +1,4 @@
-use waveform_peaks::{Bits, ChannelMode, DecodeRate, Options, OpusOptions, Overflow};
+use waveform_peaks::{Bits, ChannelMode, Crossover, DecodeRate, Options, OpusOptions, Overflow};
 
 /// Options picked by the first byte of a fuzz input.
 pub fn from_flags(flags: u8) -> (OpusOptions, Options) {
@@ -17,6 +17,10 @@ pub fn from_flags(flags: u8) -> (OpusOptions, Options) {
     }
     if flags & 8 != 0 {
         options.channel_mode = ChannelMode::Split;
+    }
+    // Shares its bit with the zoom: there are no free bits left.
+    if flags & 16 != 0 {
+        options.bands = Some(Crossover::default());
     }
     (opus_options, options)
 }

@@ -10,6 +10,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `generate_many` makes peaks for several outputs, such as several zoom
   levels, in one pass over the input, so the input is decoded only once.
+- `Options::bands` also measures the level of a low, a mid and a high
+  frequency band for each point, to colour a waveform by its spectrum.
+  `BandJsonWriter` writes these levels to a separate JSON file and passes
+  the peaks to another sink, so the peak file does not change.
 
 ### Changed
 

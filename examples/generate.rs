@@ -2,7 +2,10 @@
 //! MP4, with the `aac` feature an MP4 or ADTS AAC file, or with the `mp3`
 //! feature an MP4 or MPEG audio (MP1, MP2, MP3) file.
 //!
-//! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split]
+//! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split|mixdown]
+//! [bands]
+//!
+//! With `bands`, also writes the frequency band levels to `<output>.bands.json`.
 
 use std::{
     env,
@@ -14,15 +17,15 @@ use std::{
 
 use tempfile::NamedTempFile;
 use waveform_peaks::{
-    Bits, ChannelMode, DatWriter, Error, JsonWriter, Limits, Mp4Source, OggOpusSource, Options,
-    PcmSource, WebmOpusSource, generate,
+    BandJsonWriter, Bits, ChannelMode, Crossover, DatWriter, Error, JsonWriter, Limits, Mp4Source,
+    OggOpusSource, Options, PcmSource, PeakSink, WebmOpusSource, generate,
 };
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: {} <input> <output.dat|output.json> [zoom] [8|16] [split]",
+            "usage: {} <input> <output.dat|output.json> [zoom] [8|16] [split|mixdown] [bands]",
             args[0]
         );
         return ExitCode::FAILURE;
@@ -36,6 +39,9 @@ fn main() -> ExitCode {
     }
     if args.get(5).is_some_and(|mode| mode == "split") {
         options.channel_mode = ChannelMode::Split;
+    }
+    if args.get(6).is_some_and(|bands| bands == "bands") {
+        options.bands = Some(Crossover::default());
     }
     match run(&args[1], &args[2], &options) {
         Ok(()) => ExitCode::SUCCESS,
@@ -96,21 +102,34 @@ fn run(input: &str, output: &str, options: &Options) -> Result<(), Error> {
     // `output`. The temporary file is deleted when dropped on error.
     let dir = Path::new(output).parent().unwrap_or(Path::new("."));
     let mut file = NamedTempFile::new_in(dir)?;
+    let mut bands = options
+        .bands
+        .map(|_| NamedTempFile::new_in(dir))
+        .transpose()?;
     if output.ends_with(".json") {
-        generate(
-            source,
-            options,
-            &Limits::default(),
-            JsonWriter::new(&mut file),
-        )?;
+        write(source, options, JsonWriter::new(&mut file), bands.as_mut())?;
     } else {
-        generate(
-            source,
-            options,
-            &Limits::default(),
-            DatWriter::new(&mut file),
-        )?;
+        write(source, options, DatWriter::new(&mut file), bands.as_mut())?;
     }
     file.persist(output).map_err(io::Error::from)?;
+    if let Some(bands) = bands {
+        let path = Path::new(output).with_extension("bands.json");
+        bands.persist(path).map_err(io::Error::from)?;
+    }
     Ok(())
+}
+
+fn write<S: PeakSink>(
+    source: &mut dyn PcmSource,
+    options: &Options,
+    sink: S,
+    bands: Option<&mut NamedTempFile>,
+) -> Result<(), Error> {
+    let limits = Limits::default();
+    match bands {
+        Some(bands) => {
+            generate(source, options, &limits, BandJsonWriter::new(sink, bands)).map(drop)
+        }
+        None => generate(source, options, &limits, sink).map(drop),
+    }
 }

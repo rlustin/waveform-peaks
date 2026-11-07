@@ -1,4 +1,5 @@
-use crate::{Bits, ChannelMode, Error, Options, PeakSink};
+use crate::bands::BandFilter;
+use crate::{Bands, Bits, ChannelMode, Crossover, Error, Options, PeakSink};
 
 /// Header fields shared by every output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +13,9 @@ pub struct Header {
     pub bits: Bits,
     /// Output channel count: 1 for mixdown, the input channel count for split.
     pub channels: u16,
+    /// Band edges when [`Options::bands`] is set, in which case each point
+    /// comes through [`PeakSink::point_with_bands`].
+    pub bands: Option<Crossover>,
 }
 
 /// One `(min, max)` pair, already quantized to the output bit depth.
@@ -41,7 +45,8 @@ impl Peak {
 ///
 /// Feed interleaved 16-bit frames with [`push_interleaved`](Self::push_interleaved)
 /// in blocks of any size, then call [`finish`](Self::finish). State is one
-/// accumulator per output channel, so memory does not grow with the input.
+/// accumulator per output channel, and one fixed filter bank per output
+/// channel with [`Options::bands`], so memory does not grow with the input.
 /// Each completed point goes straight to the sink.
 #[derive(Debug)]
 pub struct PeakBuilder<S: PeakSink> {
@@ -52,6 +57,9 @@ pub struct PeakBuilder<S: PeakSink> {
     length: u32,
     accumulators: Vec<Peak>,
     quantized: Vec<Peak>,
+    /// Empty when [`Options::bands`] is `None`.
+    filters: Vec<BandFilter>,
+    levels: Vec<Bands>,
 }
 
 impl<S: PeakSink> PeakBuilder<S> {
@@ -84,8 +92,13 @@ impl<S: PeakSink> PeakBuilder<S> {
             samples_per_pixel: options.samples_per_pixel,
             bits: options.bits,
             channels,
+            bands: options.bands,
         };
         sink.begin(&header)?;
+        let filters = match &options.bands {
+            Some(crossover) => vec![BandFilter::new(crossover, sample_rate); channels as usize],
+            None => Vec::new(),
+        };
         Ok(PeakBuilder {
             sink,
             header,
@@ -94,6 +107,8 @@ impl<S: PeakSink> PeakBuilder<S> {
             length: 0,
             accumulators: vec![Peak::EMPTY; channels as usize],
             quantized: vec![Peak::EMPTY; channels as usize],
+            levels: vec![Bands::default(); filters.len()],
+            filters,
         })
     }
 
@@ -108,7 +123,8 @@ impl<S: PeakSink> PeakBuilder<S> {
     ///
     /// [`Error::InvalidInput`] when `samples` does not hold a whole number of
     /// frames. [`Error::LimitExceeded`] when the point count passes `u32::MAX`.
-    /// Errors from [`PeakSink::point`] pass through.
+    /// Errors from [`PeakSink::point`] and [`PeakSink::point_with_bands`] pass
+    /// through.
     pub fn push_interleaved(&mut self, samples: &[i16]) -> Result<(), Error> {
         if !samples.len().is_multiple_of(self.input_channels) {
             return Err(Error::InvalidInput(format!(
@@ -122,10 +138,17 @@ impl<S: PeakSink> PeakBuilder<S> {
             if mixdown {
                 let sum: i32 = frame.iter().map(|&value| value as i32).sum();
                 // Rust integer division truncates toward zero, matching audiowaveform.
-                self.accumulators[0].include((sum / self.input_channels as i32) as i16);
+                let value = (sum / self.input_channels as i32) as i16;
+                self.accumulators[0].include(value);
+                if let Some(filter) = self.filters.first_mut() {
+                    filter.push(value);
+                }
             } else {
                 for (accumulator, &value) in self.accumulators.iter_mut().zip(frame) {
                     accumulator.include(value);
+                }
+                for (filter, &value) in self.filters.iter_mut().zip(frame) {
+                    filter.push(value);
                 }
             }
             self.frames_in_block += 1;
@@ -141,7 +164,8 @@ impl<S: PeakSink> PeakBuilder<S> {
     /// # Errors
     ///
     /// [`Error::LimitExceeded`] when the point count passes `u32::MAX`. Errors
-    /// from [`PeakSink::point`] and [`PeakSink::finish`] pass through.
+    /// from [`PeakSink::point`], [`PeakSink::point_with_bands`] and
+    /// [`PeakSink::finish`] pass through.
     pub fn finish(mut self) -> Result<S::Output, Error> {
         if self.frames_in_block > 0 {
             self.emit()?;
@@ -162,10 +186,17 @@ impl<S: PeakSink> PeakBuilder<S> {
             };
             *accumulator = Peak::EMPTY;
         }
+        for (levels, filter) in self.levels.iter_mut().zip(&mut self.filters) {
+            *levels = filter.take(self.frames_in_block);
+        }
         self.length = self.length.checked_add(1).ok_or(Error::LimitExceeded(
             "waveform length exceeds u32::MAX points",
         ))?;
         self.frames_in_block = 0;
-        self.sink.point(&self.quantized)
+        if self.filters.is_empty() {
+            self.sink.point(&self.quantized)
+        } else {
+            self.sink.point_with_bands(&self.quantized, &self.levels)
+        }
     }
 }
