@@ -1017,3 +1017,179 @@ pub fn wav(tag: u16, channels: u16, rate: u32, bits: u16, data: &[u8]) -> Vec<u8
         riff_chunk(b"data", data),
     ])
 }
+
+/// A 34-byte FLAC `STREAMINFO` body. A `total` of 0 means unknown.
+pub fn flac_streaminfo(rate: u32, channels: u8, bits: u8, total: u64) -> Vec<u8> {
+    let packed =
+        (rate as u64) << 44 | ((channels - 1) as u64) << 41 | ((bits - 1) as u64) << 36 | total;
+    [
+        16u16.to_be_bytes().as_slice(),
+        &u16::MAX.to_be_bytes(),
+        &[0; 6],
+        &packed.to_be_bytes(),
+        &[0; 16],
+    ]
+    .concat()
+}
+
+/// A FLAC metadata block.
+pub fn flac_block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
+    let flag = if last { 0x80 } else { 0 };
+    [
+        &[flag | kind],
+        &(body.len() as u32).to_be_bytes()[1..],
+        body,
+    ]
+    .concat()
+}
+
+/// A FLAC file with `streaminfo` as its only metadata block.
+pub fn flac_file(streaminfo: &[u8], frames: &[Vec<u8>]) -> Vec<u8> {
+    [
+        b"fLaC".as_slice(),
+        &flac_block(0, true, streaminfo),
+        &frames.concat(),
+    ]
+    .concat()
+}
+
+/// A FLAC frame of verbatim subframes, one per channel, with `bits` per
+/// sample. Widths without a frame header code are coded as "from
+/// `STREAMINFO`".
+pub fn flac_frame(number: u32, bits: u8, channels: &[Vec<i32>]) -> Vec<u8> {
+    flac_verbatim_frame(0xF8, number, bits, channels)
+}
+
+/// A frame of a variable-block-size stream, which starts at `sample`.
+pub fn flac_variable_frame(sample: u32, bits: u8, channels: &[Vec<i32>]) -> Vec<u8> {
+    flac_verbatim_frame(0xF9, sample, bits, channels)
+}
+
+fn flac_verbatim_frame(sync: u8, number: u32, bits: u8, channels: &[Vec<i32>]) -> Vec<u8> {
+    flac_frame_with(
+        sync,
+        number,
+        bits,
+        channels.len(),
+        channels[0].len(),
+        |out| {
+            for channel in channels {
+                // Zero pad bit, verbatim type 000001, no wasted bits.
+                out.write(0b0000_0010, 8);
+                for &sample in channel {
+                    out.write(sample as u32 as u64, bits as u32);
+                }
+            }
+        },
+    )
+}
+
+/// A mono frame whose residual has an escape code: claxon does not decode
+/// it, but it is valid FLAC.
+pub fn flac_escaped_frame(number: u32, bits: u8, samples: &[i32]) -> Vec<u8> {
+    flac_frame_with(0xF8, number, bits, 1, samples.len(), |out| {
+        // Zero pad bit, fixed type of order 0 (001000), no wasted bits.
+        out.write(0b0001_0000, 8);
+        // Rice coding, partition order 0, escape parameter, raw sample bits.
+        out.write(0b00_0000_1111, 10);
+        out.write(bits as u64, 5);
+        for &sample in samples {
+            out.write(sample as u32 as u64, bits as u32);
+        }
+    })
+}
+
+fn flac_frame_with(
+    sync: u8,
+    number: u32,
+    bits: u8,
+    channels: usize,
+    block_size: usize,
+    subframes: impl FnOnce(&mut BitWriter),
+) -> Vec<u8> {
+    let code = match bits {
+        8 => 1,
+        12 => 2,
+        16 => 4,
+        20 => 5,
+        24 => 6,
+        _ => 0,
+    };
+    let mut frame = vec![0xFF, sync, 0x70, ((channels as u8 - 1) << 4) | code << 1];
+    frame.extend(flac_utf8(number));
+    frame.extend((block_size as u16 - 1).to_be_bytes());
+    frame.push(flac_crc8(&frame));
+    let mut out = BitWriter::default();
+    subframes(&mut out);
+    frame.extend(out.finish());
+    let crc = flac_crc16(&frame);
+    frame.extend(crc.to_be_bytes());
+    frame
+}
+
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    acc: u64,
+    count: u32,
+}
+
+impl BitWriter {
+    fn write(&mut self, value: u64, bits: u32) {
+        for bit in (0..bits).rev() {
+            self.acc = self.acc << 1 | (value >> bit & 1);
+            self.count += 1;
+            if self.count == 8 {
+                self.bytes.push(self.acc as u8);
+                self.acc = 0;
+                self.count = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.count > 0 {
+            self.write(0, 8 - self.count);
+        }
+        self.bytes
+    }
+}
+
+/// The UTF-8-like coding of FLAC frame numbers.
+fn flac_utf8(value: u32) -> Vec<u8> {
+    if value < 0x80 {
+        return vec![value as u8];
+    }
+    let extra = (1..6).find(|&n| value < 1 << (6 * n + 6 - n)).unwrap();
+    let mut bytes = vec![(0xFF00u16 >> (extra + 1)) as u8 | (value >> (6 * extra)) as u8];
+    bytes.extend(
+        (0..extra)
+            .rev()
+            .map(|n| 0x80 | (value >> (6 * n) & 0x3F) as u8),
+    );
+    bytes
+}
+
+pub fn flac_crc8(data: &[u8]) -> u8 {
+    data.iter().fold(0, |crc, &byte| {
+        (0..8).fold(crc ^ byte, |crc, _| {
+            if crc & 0x80 != 0 {
+                crc << 1 ^ 0x07
+            } else {
+                crc << 1
+            }
+        })
+    })
+}
+
+fn flac_crc16(data: &[u8]) -> u16 {
+    data.iter().fold(0, |crc, &byte| {
+        (0..8).fold(crc ^ (byte as u16) << 8, |crc, _| {
+            if crc & 0x8000 != 0 {
+                crc << 1 ^ 0x8005
+            } else {
+                crc << 1
+            }
+        })
+    })
+}

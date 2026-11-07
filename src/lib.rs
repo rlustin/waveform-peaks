@@ -9,11 +9,13 @@
 //! with the default `opus` feature, `OggOpusSource` and `WebmOpusSource`
 //! for Opus in Ogg, WebM and Matroska; with the optional `aac` feature,
 //! `AdtsAacSource` for AAC in ADTS; with the optional `mp3` feature,
-//! `MpegAudioSource` for MP1, MP2 and MP3 files; and with any of them,
-//! `Mp4Source` for these codecs in MP4.
+//! `MpegAudioSource` for MP1, MP2 and MP3 files; with any of these three,
+//! `Mp4Source` for these codecs in MP4; and with the optional `flac`
+//! feature, `FlacSource` for FLAC files.
 //!
 //! For the same options the output matches BBC audiowaveform byte for byte on
-//! PCM input, and on WAV input with [`Overflow::Wrap`]. On Opus input with
+//! PCM input, on FLAC input that is not damaged and that claxon decodes, and
+//! on WAV input with [`Overflow::Wrap`]. On Opus input with
 //! `Overflow::Wrap` it is within ±1 per value, because the bundled libopus
 //! build differs from audiowaveform's in the last bit (see `tests/oracle.rs`).
 //!
@@ -84,6 +86,8 @@ pub use options::{Bits, ChannelMode, Limits, Options};
 pub use sink::{BandJsonWriter, DatWriter, JsonWriter, MemorySink, PeakSink, Waveform};
 #[cfg(feature = "aac")]
 pub use source::AdtsAacSource;
+#[cfg(feature = "flac")]
+pub use source::FlacSource;
 #[cfg(feature = "aac")]
 #[allow(deprecated)]
 pub use source::Mp4AacSource;

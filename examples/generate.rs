@@ -1,6 +1,7 @@
 //! Generates a `.dat` or `.json` waveform from an Opus file in Ogg, WebM or
-//! MP4, with the `aac` feature an MP4 or ADTS AAC file, or with the `mp3`
-//! feature an MP4 or MPEG audio (MP1, MP2, MP3) file.
+//! MP4, with the `aac` feature an MP4 or ADTS AAC file, with the `mp3`
+//! feature an MP4 or MPEG audio (MP1, MP2, MP3) file, or with the `flac`
+//! feature a FLAC file.
 //!
 //! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split|mixdown]
 //! [bands]
@@ -60,12 +61,18 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
     let webm = magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]);
     let mp4 = magic.get(4..8) == Some(b"ftyp");
     // ADTS headers have the layer bits MPEG audio reserves. Past an ID3 tag,
-    // only the extension tells them apart.
+    // only the extension tells them and FLAC apart.
     let tagged = magic.starts_with(b"ID3");
-    let adts = matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0)
-        || tagged && path.ends_with(".aac");
+    let extension = |name: &str| {
+        Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(name))
+    };
+    let flac = magic.starts_with(b"fLaC") || tagged && extension("flac");
+    let adts =
+        matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0) || tagged && extension("aac");
     let mpeg_audio = matches!(magic, [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0)
-        || tagged && !adts;
+        || tagged && !adts && !flac;
     if ogg {
         return Ok(Box::new(OggOpusSource::new(input)?));
     }
@@ -91,8 +98,15 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
             "MPEG audio needs the mp3 feature".into(),
         ));
     }
+    #[cfg(feature = "flac")]
+    if flac {
+        return Ok(Box::new(waveform_peaks::FlacSource::new(input)?));
+    }
+    if flac {
+        return Err(Error::Unsupported("FLAC needs the flac feature".into()));
+    }
     Err(Error::Unsupported(
-        "not Ogg, WebM, MP4, ADTS or MPEG audio".into(),
+        "not Ogg, WebM, MP4, ADTS, MPEG audio or FLAC".into(),
     ))
 }
 

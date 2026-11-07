@@ -12,6 +12,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   signed and 32- and 64-bit float PCM. It needs no feature and no
   dependency. With `Overflow::Wrap`, its output is the same as the
   audiowaveform output, except for float samples far beyond full scale.
+- `FlacSource` reads FLAC files with 8-, 16- and 24-bit samples, behind the
+  new `flac` feature. It decodes with claxon, a pure-Rust decoder with the
+  Apache-2.0 license. For files that are not damaged and that claxon
+  decodes, its output is the same as the audiowaveform output, also for
+  files that FFmpeg writes to a pipe and for truncated files. After damage,
+  it continues at the next frame that decodes and gives silence for the
+  lost frames, so that the waveform stays in time with the audio.
 
 ### Changed
 

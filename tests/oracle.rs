@@ -387,6 +387,25 @@ fn wav_layouts_match_audiowaveform() {
     }
 }
 
+/// The samples of a 16-bit WAV file.
+#[cfg(any(feature = "mp3", feature = "flac"))]
+fn wav_file_samples(path: &Path) -> Vec<i16> {
+    let bytes = fs::read(path).unwrap();
+    let mut at = 12;
+    loop {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        if &bytes[at..at + 4] == b"data" {
+            return bytes[at + 8..at + 8 + len]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&pair| i16::from_le_bytes(pair))
+                .collect();
+        }
+        at += 8 + len + len % 2;
+    }
+}
+
 /// Decodes all of `source`, with its sample rate and channel count.
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 fn decoded<P: PcmSource>(source: P) -> (Vec<i16>, u32, u16) {
@@ -1061,24 +1080,6 @@ mod mpeg_audio_input {
         }
     }
 
-    /// The samples of a 16-bit WAV file.
-    fn wav_samples(path: &Path) -> Vec<i16> {
-        let bytes = fs::read(path).unwrap();
-        let mut at = 12;
-        loop {
-            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
-            if &bytes[at..at + 4] == b"data" {
-                return bytes[at + 8..at + 8 + len]
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&pair| i16::from_le_bytes(pair))
-                    .collect();
-            }
-            at += 8 + len + len % 2;
-        }
-    }
-
     /// Damaged files: libmad skips data between frames and drops the frames
     /// that need a bit reservoir it has not read. After skipped data, its
     /// synthesis filter has not seen the dropped frames, so up to one frame
@@ -1175,7 +1176,7 @@ mod mpeg_audio_input {
                     "-o",
                     output.to_str().unwrap(),
                 ]);
-                let theirs = wav_samples(&output);
+                let theirs = wav_file_samples(&output);
                 let ours =
                     common::samples(MpegAudioSource::new(fs::File::open(&input).unwrap()).unwrap())
                         .unwrap();
@@ -1352,6 +1353,245 @@ mod mpeg_audio_input {
                     "{context}: samples differ by {worst}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(feature = "flac")]
+mod flac_input {
+    use super::*;
+    use waveform_peaks::FlacSource;
+
+    fn flac(args: &[&str]) {
+        run(
+            &tool("FLAC", "flac"),
+            [&["--silent", "--force"], args].concat(),
+        );
+    }
+
+    /// Checks our samples against the WAV file that audiowaveform writes,
+    /// and our peaks against its peaks for a few option sets.
+    fn assert_matches(dir: &Path, file: &[u8], context: &str) {
+        let input = dir.join("input.flac");
+        fs::write(&input, file).unwrap();
+        let output = dir.join("output.wav");
+        audiowaveform(&[
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        let theirs = wav_file_samples(&output);
+        let ours = common::samples(FlacSource::new(Cursor::new(file)).unwrap()).unwrap();
+        assert_eq!(ours.len(), theirs.len(), "sample count, {context}");
+        let first_difference = ours.iter().zip(&theirs).position(|(a, b)| a != b);
+        assert_eq!(first_difference, None, "first differing sample, {context}");
+
+        for options in [
+            Options::default(),
+            options(37, Bits::Eight, ChannelMode::Split),
+        ] {
+            let expected = reference(&input, &[], &options, &dir.join("ref.dat"));
+            let mut source = FlacSource::new(Cursor::new(file)).unwrap();
+            let actual = ours_dat(&mut source, &options);
+            assert_dat_matches(&actual, &expected, 0, &format!("{context}, {options:?}"));
+        }
+    }
+
+    /// `file` as written, and with the changes that uploads see: no sample
+    /// count, as FFmpeg writes to a pipe, a cut, and ID3 tags.
+    fn variants(file: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        let mut unknown_total = file.to_vec();
+        unknown_total[8 + 13] &= 0xF0;
+        unknown_total[8 + 14..8 + 18].fill(0);
+        let id3v2 = [b"ID3\x03\x00\x00\x00\x00\x01\x00".as_slice(), &[0; 128]].concat();
+        vec![
+            ("as written", file.to_vec()),
+            ("unknown total", unknown_total),
+            ("truncated", file[..file.len() - 1001].to_vec()),
+            ("ID3v1 tag", [file, b"TAG", &[0x20; 125]].concat()),
+            ("ID3v2 tag", [id3v2.as_slice(), file].concat()),
+        ]
+    }
+
+    const SIGNAL: &str = "aevalsrc=1.25*sin(440*2*PI*t)*sin(3*PI*t)|0.5*sin(1000*2*PI*t)+0.01*random(0)|0.3*sin(50*2*PI*t):s=44100:d=1.37";
+
+    #[test]
+    #[ignore = "needs audiowaveform and ffmpeg on PATH"]
+    fn ffmpeg_flac_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("encoded.flac");
+        for (width, format) in [
+            ("16-bit", &["-sample_fmt", "s16"][..]),
+            (
+                "24-bit",
+                &["-sample_fmt", "s32", "-bits_per_raw_sample", "24"],
+            ),
+        ] {
+            for channels in ["1", "2", "6"] {
+                for level in ["0", "5", "12"] {
+                    ffmpeg(
+                        &[
+                            &["-f", "lavfi", "-i", SIGNAL, "-ac", channels, "-c:a", "flac"][..],
+                            format,
+                            &["-compression_level", level, path.to_str().unwrap()],
+                        ]
+                        .concat(),
+                    );
+                    let file = fs::read(&path).unwrap();
+                    for (variant, file) in variants(&file) {
+                        let context = format!("{width}, {channels} ch, level {level}, {variant}");
+                        assert_matches(dir.path(), &file, &context);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs audiowaveform, ffmpeg and flac on PATH"]
+    fn libflac_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let wav = dir.path().join("input.wav");
+        let path = dir.path().join("encoded.flac");
+        for (width, codec) in [
+            ("8-bit", "pcm_u8"),
+            ("16-bit", "pcm_s16le"),
+            ("24-bit", "pcm_s24le"),
+        ] {
+            for channels in ["1", "2"] {
+                ffmpeg(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    SIGNAL,
+                    "-ac",
+                    channels,
+                    "-c:a",
+                    codec,
+                    wav.to_str().unwrap(),
+                ]);
+                for level in [&["-0"][..], &["-8"], &["-5", "--blocksize=1152"]] {
+                    flac(
+                        &[
+                            level,
+                            &["-o", path.to_str().unwrap(), wav.to_str().unwrap()],
+                        ]
+                        .concat(),
+                    );
+                    let file = fs::read(&path).unwrap();
+                    for (variant, file) in variants(&file) {
+                        let context = format!("{width}, {channels} ch, {level:?}, {variant}");
+                        assert_matches(dir.path(), &file, &context);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Frames of `channels` channels with `bits` per sample, from noise
+    /// with full-scale extremes.
+    fn frames(
+        count: usize,
+        block_size: usize,
+        channels: usize,
+        bits: u8,
+        seed: u64,
+    ) -> Vec<Vec<u8>> {
+        let noise = common::pcm(count * block_size, channels, seed);
+        (0..count)
+            .map(|frame| {
+                let samples: Vec<Vec<i32>> = (0..channels)
+                    .map(|channel| {
+                        (0..block_size)
+                            .map(|i| {
+                                let at = frame * block_size + i;
+                                let value = (noise[at * channels + channel] as i32) << 8
+                                    | (at as i32 & 0xFF);
+                                value >> (24 - bits as i32)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                common::flac_frame(frame as u32, bits, &samples)
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs audiowaveform on PATH"]
+    fn flac_layouts_match_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let info = common::flac_streaminfo;
+        let file = |info: Vec<u8>, frames: &[Vec<u8>]| common::flac_file(&info, frames);
+        let block = common::flac_block;
+        let stereo16 = frames(4, 1000, 2, 16, 1);
+        let mut widths = frames(1, 1000, 2, 16, 2);
+        widths.extend(frames(1, 700, 2, 24, 3));
+        widths.extend(frames(1, 500, 2, 12, 4));
+        widths.extend(frames(1, 300, 2, 8, 5));
+        widths.extend(frames(1, 200, 2, 20, 6));
+        let mut channel_change = stereo16[..2].to_vec();
+        channel_change.extend(frames(2, 1000, 1, 16, 7));
+        for (name, file) in [
+            (
+                "8-bit",
+                file(info(8_000, 3, 8, 0), &frames(3, 4096, 3, 8, 8)),
+            ),
+            (
+                "24-bit",
+                file(info(48_000, 2, 24, 0), &frames(3, 4096, 2, 24, 9)),
+            ),
+            (
+                "16-bit, 8 channels",
+                file(info(44_100, 8, 16, 0), &frames(2, 2000, 8, 16, 10)),
+            ),
+            ("widths per frame", file(info(8_000, 2, 16, 0), &widths)),
+            (
+                "total within a frame",
+                file(info(8_000, 2, 16, 2500), &stereo16),
+            ),
+            (
+                "total past the end",
+                file(info(8_000, 2, 16, 9000), &stereo16),
+            ),
+            (
+                "other channel count",
+                file(info(8_000, 2, 16, 0), &channel_change),
+            ),
+            (
+                "largest block",
+                file(info(8_000, 2, 16, 0), &frames(2, 65_535, 2, 16, 11)),
+            ),
+            ("sample rate of 1 Hz", file(info(1, 2, 16, 0), &stereo16)),
+            (
+                "highest sample rate",
+                file(info(1_048_575, 2, 16, 0), &stereo16),
+            ),
+            (
+                "padding before STREAMINFO",
+                [
+                    b"fLaC".as_slice(),
+                    &block(1, false, &[0; 10]),
+                    &block(0, false, &info(8_000, 2, 16, 0)),
+                    &block(9, false, &[1; 33]),
+                    &block(127, true, &[]),
+                    &stereo16.concat(),
+                ]
+                .concat(),
+            ),
+            (
+                "two STREAMINFO blocks",
+                [
+                    b"fLaC".as_slice(),
+                    &block(0, false, &info(8_000, 2, 16, 1500)),
+                    &block(0, true, &[info(16_000, 2, 16, 3500), vec![0; 4]].concat()),
+                    &stereo16.concat(),
+                ]
+                .concat(),
+            ),
+        ] {
+            assert_matches(dir.path(), &file, name);
         }
     }
 }
