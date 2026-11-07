@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use opus::{Channels, Decoder};
 
-use super::invalid;
+use super::{Overflow, invalid};
 use crate::Error;
 
 /// Sample rates libopus can decode to.
@@ -25,22 +25,6 @@ pub enum DecodeRate {
     MatchInput,
     /// Always 48 kHz.
     Full,
-}
-
-/// What happens to decoded samples outside `[-1.0, 1.0]`.
-///
-/// Opus decoding can overshoot full scale on loud or clipped audio.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Overflow {
-    /// Clamp to the 16-bit range, so clipped audio peaks at full scale.
-    #[default]
-    Saturate,
-    /// Wrap around in two's complement, as audiowaveform does (its decoder
-    /// converts without clipping). An overshooting sample turns into a value
-    /// of the opposite sign and drops out of the peaks, so clipped passages
-    /// read slightly below full scale. Use this to match audiowaveform (within
-    /// ±1 per value with the bundled libopus, exact with the same libopus build).
-    Wrap,
 }
 
 /// Decoder settings, shared by [`OggOpusSource`](crate::OggOpusSource),

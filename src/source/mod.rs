@@ -16,6 +16,7 @@ mod ogg_opus;
 mod opus;
 #[cfg(any(feature = "aac", feature = "mp3"))]
 mod symphonia;
+mod wav;
 #[cfg(feature = "opus")]
 mod webm_opus;
 
@@ -36,11 +37,32 @@ pub use mpeg_audio::MpegAudioSource;
 #[cfg(feature = "opus")]
 pub use ogg_opus::OggOpusSource;
 #[cfg(feature = "opus")]
-pub use opus::{DecodeRate, OpusOptions, Overflow};
+pub use opus::{DecodeRate, OpusOptions};
+pub use wav::{WavOptions, WavSource};
 #[cfg(feature = "opus")]
 pub use webm_opus::WebmOpusSource;
 
 use crate::Error;
+
+/// What happens to decoded samples outside `[-1.0, 1.0]`.
+///
+/// Opus decoding can overshoot full scale on loud or clipped audio, and a
+/// floating-point WAV file can hold samples beyond full scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overflow {
+    /// Clamp to the 16-bit range, so clipped audio peaks at full scale.
+    #[default]
+    Saturate,
+    /// Wrap around in two's complement, as audiowaveform does (it converts
+    /// without clipping). An overshooting sample turns into a value of the
+    /// opposite sign and drops out of the peaks, so clipped passages read
+    /// slightly below full scale. Use this to match audiowaveform: exactly
+    /// on WAV input, except for samples beyond about 65,000 times full scale,
+    /// where audiowaveform depends on the CPU; and on Opus input within ±1
+    /// per value with the bundled libopus (exact with the same libopus
+    /// build).
+    Wrap,
+}
 
 /// A pull-based source of interleaved 16-bit PCM.
 ///
@@ -186,7 +208,6 @@ pub(crate) fn skip_id3v2<R: Read>(reader: &mut R) -> Result<([u8; 3], usize), Er
     }
 }
 
-#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 pub(crate) fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
 }

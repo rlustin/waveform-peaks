@@ -18,11 +18,10 @@ use std::{fs, io::Cursor, path::Path};
 use common::{assert_dat_matches, options, run, tool};
 use tempfile::TempDir;
 use waveform_peaks::{
-    Bits, ChannelMode, DatWriter, JsonWriter, Limits, Options, PcmSource, PeakSink, RawPcmSource,
-    generate,
+    Bits, ChannelMode, DatWriter, JsonWriter, Limits, Options, Overflow, PcmSource, PeakSink,
+    RawPcmSource, WavOptions, WavSource, generate,
 };
 
-#[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 fn ffmpeg(args: &[&str]) {
     run(
         &tool("FFMPEG", "ffmpeg"),
@@ -147,6 +146,244 @@ fn raw_pcm_json_matches_audiowaveform() {
         let expected: serde_json::Value = serde_json::from_slice(&expected).unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&actual).unwrap();
         assert_eq!(actual, expected, "{options:?}");
+    }
+}
+
+/// `count` samples of a WAV `tag` and `bits` layout: noise with full-scale
+/// and zero runs, and for floats, values up to 1.25 times full scale.
+fn wav_samples(tag: u16, bits: u16, count: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let width = bits.div_ceil(8) as usize;
+    (0..count)
+        .flat_map(|i| {
+            let r = next();
+            let run = (i / 97) % 7;
+            if tag == 3 {
+                let value = match run {
+                    0 => -1.0,
+                    1 => 1.0,
+                    2 => 0.0,
+                    3 => (r as i32) as f64 / i32::MAX as f64 / 1000.0,
+                    _ => (r as i32) as f64 / i32::MAX as f64 * 1.25,
+                };
+                if width == 8 {
+                    value.to_le_bytes().to_vec()
+                } else {
+                    (value as f32).to_le_bytes().to_vec()
+                }
+            } else {
+                let value = match run {
+                    0 => i64::MIN,
+                    1 => i64::MAX,
+                    2 => 0,
+                    3 => (r as i64) >> 16,
+                    _ => r as i64,
+                };
+                // The most significant bytes, unsigned for 8 bits.
+                let mut bytes = value.to_be_bytes()[..width].to_vec();
+                if width == 1 {
+                    bytes[0] ^= 0x80;
+                }
+                bytes.reverse();
+                bytes
+            }
+        })
+        .collect()
+}
+
+fn wrapping() -> WavOptions {
+    let mut options = WavOptions::default();
+    options.overflow = Overflow::Wrap;
+    options
+}
+
+#[test]
+#[ignore = "needs audiowaveform on PATH"]
+fn wav_matches_audiowaveform() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("input.wav");
+    let mut cases = 0;
+    for (tag, bits) in [(1, 8), (1, 16), (1, 24), (1, 32), (3, 32), (3, 64)] {
+        for channels in [1u16, 2, 3] {
+            for frames in [1usize, 4_800, 4_801] {
+                let seed = frames as u64 + channels as u64 + bits as u64;
+                let data = wav_samples(tag, bits, frames * channels as usize, seed);
+                let file = common::wav(tag, channels, 44_100, bits, &data);
+                fs::write(&input, &file).unwrap();
+                for options in [
+                    options(2, Bits::Sixteen, ChannelMode::Mixdown),
+                    options(2, Bits::Eight, ChannelMode::Split),
+                    options(256, Bits::Sixteen, ChannelMode::Split),
+                    options(256, Bits::Eight, ChannelMode::Mixdown),
+                ] {
+                    let expected = reference(&input, &[], &options, &dir.path().join("ref.dat"));
+                    let mut source =
+                        WavSource::with_options(Cursor::new(&file), wrapping()).unwrap();
+                    let actual = ours_dat(&mut source, &options);
+                    let context = format!(
+                        "tag {tag}, {bits} bits, {channels} ch, {frames} frames, {options:?}"
+                    );
+                    assert_dat_matches(&actual, &expected, 0, &context);
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 216);
+}
+
+#[test]
+#[ignore = "needs audiowaveform and ffmpeg on PATH"]
+fn ffmpeg_wav_matches_audiowaveform() {
+    let dir = TempDir::new().unwrap();
+    // Peaks at 1.25 times full scale, so integer formats clip.
+    let signal = "aevalsrc=1.25*sin(440*2*PI*t)*sin(3*PI*t)|0.5*sin(1000*2*PI*t)|0.3*sin(50*2*PI*t):s=44100:d=1.37";
+    for (name, channels, args) in [
+        ("u8 mono", "1", &["-c:a", "pcm_u8"][..]),
+        ("s16 stereo", "2", &["-c:a", "pcm_s16le"]),
+        ("s24 extensible", "3", &["-c:a", "pcm_s24le"]),
+        ("s32", "2", &["-c:a", "pcm_s32le"]),
+        ("f32 rf64", "2", &["-c:a", "pcm_f32le", "-rf64", "always"]),
+        ("f64", "1", &["-c:a", "pcm_f64le"]),
+    ] {
+        let input = dir.path().join("input.wav");
+        let input_str = input.to_str().unwrap();
+        ffmpeg(
+            &[
+                &["-f", "lavfi", "-i", signal, "-ac", channels][..],
+                args,
+                &[input_str],
+            ]
+            .concat(),
+        );
+        let file = fs::read(&input).unwrap();
+        let data = file.windows(4).position(|w| w == b"data").unwrap();
+        let mut variants = vec![("as written", file.clone())];
+        if &file[..4] == b"RIFF" {
+            // FFmpeg writes these sizes to a pipe.
+            let mut streamed = file.clone();
+            streamed[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            streamed[data + 4..data + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+            variants.push(("streamed", streamed));
+            let mut unfinished = file.clone();
+            unfinished[4..8].copy_from_slice(&8u32.to_le_bytes());
+            unfinished[data + 4..data + 8].copy_from_slice(&0u32.to_le_bytes());
+            variants.push(("unfinished header", unfinished));
+        }
+        let mut truncated = file.clone();
+        truncated.truncate(file.len() - 1001);
+        variants.push(("truncated", truncated));
+
+        for (variant, file) in &variants {
+            let path = dir.path().join("variant.wav");
+            fs::write(&path, file).unwrap();
+            for options in [
+                Options::default(),
+                options(37, Bits::Eight, ChannelMode::Split),
+            ] {
+                let expected = reference(&path, &[], &options, &dir.path().join("ref.dat"));
+                let mut source = WavSource::with_options(Cursor::new(file), wrapping()).unwrap();
+                let actual = ours_dat(&mut source, &options);
+                let context = format!("{name}, {variant}, {options:?}");
+                assert_dat_matches(&actual, &expected, 0, &context);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs audiowaveform on PATH"]
+fn wav_layouts_match_audiowaveform() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("input.wav");
+    let i24 = |values: &[i32]| -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes()[..3].to_vec())
+            .collect()
+    };
+    let f64s =
+        |values: &[f64]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let fmt = |tag, channels, bits| {
+        common::riff_chunk(b"fmt ", &common::wav_fmt(tag, channels, 8_000, bits))
+    };
+    let mut long_fmt = common::wav_fmt(1, 1, 8_000, 16);
+    long_fmt.extend([1; 61]);
+    let data = common::le_bytes(&common::pcm(1_000, 1, 1));
+    for (name, file) in [
+        (
+            "doubles near a rounding boundary",
+            common::wav(
+                3,
+                1,
+                8_000,
+                64,
+                &f64s(&[
+                    0.5 - 1e-12,
+                    -0.5 + 1e-12,
+                    1.0 - 1e-12,
+                    2.0 / 32767.0 - 1e-15,
+                ]),
+            ),
+        ),
+        (
+            "20-bit samples",
+            common::wav(1, 1, 8_000, 20, &i24(&[0x7F_FFF0, -0x80_0000, 0x12_3450])),
+        ),
+        (
+            "12-bit samples",
+            common::wav(
+                1,
+                1,
+                8_000,
+                12,
+                &common::le_bytes(&[0x7FF0, -0x8000, 0x1230]),
+            ),
+        ),
+        (
+            "extensible float",
+            common::wav_file(&[
+                common::riff_chunk(b"fmt ", &common::wav_fmt_extensible(3, 2, 8_000, 32)),
+                common::riff_chunk(b"data", &wav_samples(3, 32, 2_000, 1)),
+            ]),
+        ),
+        (
+            "chunks with pad bytes",
+            common::wav_file(&[
+                common::riff_chunk(b"JUNK", &[0xAA; 27]),
+                fmt(1, 1, 16),
+                common::riff_chunk(b"LIST", &[0x55; 101]),
+                common::riff_chunk(b"data", &data),
+                common::riff_chunk(b"LIST", &[0x55; 101]),
+            ]),
+        ),
+        (
+            "long fmt chunk",
+            common::wav_file(&[
+                common::riff_chunk(b"fmt ", &long_fmt),
+                common::riff_chunk(b"data", &data),
+            ]),
+        ),
+        ("partial frame", common::wav(1, 2, 8_000, 16, &data[..998])),
+        ("empty data chunk before audio", {
+            let mut file = common::wav(1, 1, 8_000, 16, &[]);
+            file.extend(&data);
+            file
+        }),
+        ("odd 8-bit data", common::wav(1, 1, 8_000, 8, &data[..999])),
+    ] {
+        fs::write(&input, &file).unwrap();
+        let options = options(2, Bits::Sixteen, ChannelMode::Split);
+        let expected = reference(&input, &[], &options, &dir.path().join("ref.dat"));
+        let mut source = WavSource::with_options(Cursor::new(&file), wrapping()).unwrap();
+        let actual = ours_dat(&mut source, &options);
+        assert_dat_matches(&actual, &expected, 0, name);
     }
 }
 

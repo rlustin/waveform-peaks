@@ -45,6 +45,7 @@ Decoding is CPU-bound, so the API is synchronous. In an async server, run
 | `AdtsAacSource` | ADTS | AAC-LC | `aac` |
 | `Mp4Source` | MP4 | MP1, MP2, MP3 | `mp3` |
 | `MpegAudioSource` | MPEG audio (`.mp3`, `.mp2`) | MP1, MP2, MP3 | `mp3` |
+| `WavSource` | WAV, RF64 | PCM: 8-bit unsigned, 16-, 24- and 32-bit signed, 32- and 64-bit float | none |
 | `RawPcmSource` | none | Interleaved signed 16-bit little-endian PCM | none |
 
 Each source reads from a plain `Read`. Thus a source can decode an upload body
@@ -55,6 +56,15 @@ clusters of unknown size. `Mp4Source::new` reads fragmented MP4, which Safari
 and Chrome record, and MP4 that has the `moov` box first. The tests include
 real recordings from Chrome 155 and Safari 27: Opus in WebM, and Opus and AAC
 in MP4.
+
+`WavSource` reads the `WAVE_FORMAT_PCM`, `WAVE_FORMAT_IEEE_FLOAT` and
+`WAVE_FORMAT_EXTENSIBLE` layouts. `WavSource` stops at the end of the `data`
+chunk and does not read the chunks after it. If the `data` chunk is longer
+than the file, `WavSource` reads to the end of the file. Thus a WAV file that
+FFmpeg writes to a pipe also decodes, because FFmpeg sets the size to
+`0xFFFFFFFF`. A `data` size of 0 continues to the end of the file only if the
+RIFF size is 8. Any other `data` size of 0 gives no samples and no error, as
+in audiowaveform.
 
 FFmpeg and phones write the media data before the `moov` box by default. To
 read this layout, use `Mp4Source::new_seekable` on an input that implements
@@ -144,7 +154,7 @@ channels, the increase is approximately 50%.
 
 The default `opus` feature decodes Opus from Ogg, WebM and MP4 with libopus.
 The `opus` crate compiles libopus from source, so the build needs `cmake` and a
-C compiler. With no features, only raw PCM input is available:
+C compiler. With no features, only raw PCM and WAV input are available:
 
 ```toml
 waveform-peaks = { version = "0.1", default-features = false }
@@ -186,6 +196,11 @@ come from the audiowaveform source code, which has the GPL-3.0 license.
 | MP3 framing | Frame with a Xing or Info tag not decoded; encoder delay + 529 frames trimmed if the LAME extension names `LAME` or `Lavc`; end padding kept |
 | MPEG audio samples | Float output × 32768, rounded down; values at or below -1.0 clip to -32767 |
 | Cut MPEG audio stream | Incomplete last frame dropped |
+| WAV integer samples | The 16 most significant bits; 8-bit samples are unsigned |
+| WAV float samples | Value × 32767, truncated toward zero; values out of range wrap (`Overflow::Wrap`) |
+| WAV sample width | From the bits per sample, rounded up to whole bytes, not from the block alignment |
+| WAV `data` chunk | Read to the end of the file if it is longer than the file; incomplete last frame dropped |
+| WAV `data` size of 0 | Data continues to the end of the file if the RIFF size is 8; otherwise no samples |
 
 audiowaveform does not read Opus in WebM or MP4. Thus the tests compare these
 sources with `OggOpusSource` on the same packets:
@@ -250,8 +265,11 @@ audiowaveform does not read MPEG audio in MP4. Thus the tests compare
 
 The default is `Overflow::Saturate`, because with wrapping, clipped audio
 shows as less than full scale. To match audiowaveform, use `Overflow::Wrap`.
-With the bundled libopus, the output is then within ±1 per value of the
-audiowaveform output (see Oracle tests).
+For WAV input, the output is then the same as the audiowaveform output. The
+only exception is float samples beyond about 65,000 times full scale. For
+these samples, the audiowaveform output depends on the processor. For
+Opus input with the bundled libopus, the output is then within ±1 per value of
+the audiowaveform output (see Oracle tests).
 
 ## Development
 
@@ -269,7 +287,7 @@ cargo clippy --no-default-features --features mp3 --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio, wav
 ```
 
 GitHub Actions runs all of these commands on each push and pull request.
@@ -302,6 +320,10 @@ and `ffmpeg` from Ubuntu. The tests compare:
 - raw PCM, byte for byte, in 192 combinations of channels, length, zoom, bits,
   and mixdown or split;
 - JSON output, field by field;
+- WAV files, byte for byte, in all the sample formats of `WavSource`, with
+  values up to 1.25 times full scale. The tests also use the WAV files that
+  FFmpeg writes to a file and to a pipe, files with an unfinished header,
+  truncated files, and unusual chunk layouts;
 - Ogg Opus fixtures that ffmpeg encodes when the tests run: mono, stereo with
   an odd length, 16 kHz input, 44.1 kHz input, a changed `OpusHead` rate and
   gain, and a square wave that clips;
@@ -340,9 +362,13 @@ output.
 - For chained Ogg files, `OggOpusSource` decodes only the first link.
 - `OggOpusSource` rejects an Ogg file if its first page belongs to a Skeleton
   stream, because the source decodes only the stream of the first page.
-- Other formats (WAV, FLAC, Vorbis) are not supported. Symphonia can
-  decode them, but each of its format crates needs an MPL-2.0 exception in
-  `deny.toml`.
+- FLAC and Vorbis are not supported. Symphonia can decode them, but each
+  of its format crates needs an MPL-2.0 exception in `deny.toml`.
+- `WavSource` does not decode compressed WAV formats, such as A-law, μ-law
+  and ADPCM. It also rejects big-endian RIFX files, and files with more than
+  1024 channels.
+- `WavSource` rejects 24-bit samples in 32-bit blocks. audiowaveform decodes
+  these files, because libsndfile guesses their layout from the samples.
 - Symphonia does not decode the SBR and parametric stereo layers of HE-AAC.
 - libmad drops a layer III frame if its Huffman data is longer than the
   length in its side information. Symphonia decodes this frame. A cut frame

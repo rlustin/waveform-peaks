@@ -48,3 +48,10 @@ path = "fuzz_targets/mpeg_audio.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wav"
+path = "fuzz_targets/wav.rs"
+test = false
+doc = false
+bench = false
