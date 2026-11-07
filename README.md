@@ -3,6 +3,10 @@
 Generates BBC audiowaveform-compatible peak data (`.dat` and JSON) from
 streamed audio, with constant memory use.
 
+The crate can also measure the levels of three frequency bands at each point.
+A player can use these levels to colour the waveform by its spectrum (see
+[Frequency bands](#frequency-bands)).
+
 ## Usage
 
 ```rust
