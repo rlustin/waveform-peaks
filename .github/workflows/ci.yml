@@ -71,6 +71,9 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: cargo doc --no-deps --no-default-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   docs-rs:
     name: docs.rs build

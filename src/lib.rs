@@ -6,7 +6,7 @@
 //! with the input: an hour-long upload uses the same memory as a second.
 //!
 //! Sources are [`RawPcmSource`] for raw PCM and [`WavSource`] for WAV files;
-//! with the default `opus` feature, [`OggOpusSource`] and [`WebmOpusSource`]
+//! with the default `opus` feature, `OggOpusSource` and `WebmOpusSource`
 //! for Opus in Ogg, WebM and Matroska; with the optional `aac` feature,
 //! `AdtsAacSource` for AAC in ADTS; with the optional `mp3` feature,
 //! `MpegAudioSource` for MP1, MP2 and MP3 files; and with any of them,
