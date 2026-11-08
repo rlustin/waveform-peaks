@@ -46,6 +46,7 @@ Decoding is CPU-bound, so the API is synchronous. In an async server, run
 | `Mp4Source` | MP4 | MP1, MP2, MP3 | `mp3` |
 | `MpegAudioSource` | MPEG audio (`.mp3`, `.mp2`) | MP1, MP2, MP3 | `mp3` |
 | `WavSource` | WAV, RF64 | PCM: 8-bit unsigned, 16-, 24- and 32-bit signed, 32- and 64-bit float | none |
+| `FlacSource` | FLAC | FLAC: 8-, 16- and 24-bit | `flac` |
 | `RawPcmSource` | none | Interleaved signed 16-bit little-endian PCM | none |
 
 Each source reads from a plain `Read`. Thus a source can decode an upload body
@@ -65,6 +66,15 @@ FFmpeg writes to a pipe also decodes, because FFmpeg sets the size to
 `0xFFFFFFFF`. A `data` size of 0 continues to the end of the file only if the
 RIFF size is 8. Any other `data` size of 0 gives no samples and no error, as
 in audiowaveform.
+
+`FlacSource` skips ID3v2 tags before the `fLaC` marker. It also skips all
+metadata blocks other than `STREAMINFO`, and does not keep them in memory.
+`FlacSource` stops at the sample count in `STREAMINFO`. If this count is 0,
+`FlacSource` reads to the end of the file. FFmpeg writes a count of 0 to a
+pipe. If the end of the file cuts a frame, `FlacSource` drops this frame.
+Thus a truncated upload gives the frames before the cut. If a frame does not
+decode, `FlacSource` continues at the next frame that decodes. Silence
+replaces the lost frames, thus the waveform stays in time with the audio.
 
 FFmpeg and phones write the media data before the `moov` box by default. To
 read this layout, use `Mp4Source::new_seekable` on an input that implements
@@ -177,6 +187,14 @@ also uses Symphonia, so it is off by default:
 waveform-peaks = { version = "0.1", features = ["mp3"] }
 ```
 
+The optional `flac` feature decodes FLAC with
+[claxon](https://crates.io/crates/claxon), a pure-Rust decoder with the
+Apache-2.0 license:
+
+```toml
+waveform-peaks = { version = "0.1", features = ["flac"] }
+```
+
 ## Compatibility with audiowaveform
 
 The rules below come from black-box tests of audiowaveform 1.11.1. They do not
@@ -201,6 +219,11 @@ come from the audiowaveform source code, which has the GPL-3.0 license.
 | WAV sample width | From the bits per sample, rounded up to whole bytes, not from the block alignment |
 | WAV `data` chunk | Read to the end of the file if it is longer than the file; incomplete last frame dropped |
 | WAV `data` size of 0 | Data continues to the end of the file if the RIFF size is 8; otherwise no samples |
+| FLAC samples | The 16 most significant bits, by the sample width in the header of each frame |
+| FLAC sample count | Output stops at the `STREAMINFO` count; a count of 0 continues to the end of the file |
+| FLAC metadata | The last `STREAMINFO` block applies; a different channel count in it is an error |
+| Cut FLAC file | Incomplete last frame dropped |
+| FLAC frame with a different channel count | Output stops before this frame |
 
 audiowaveform does not read Opus in WebM or MP4. Thus the tests compare these
 sources with `OggOpusSource` on the same packets:
@@ -263,6 +286,30 @@ audiowaveform does not read MPEG audio in MP4. Thus the tests compare
 - An MPEG audio stream does not record the MP2 encoder delay. Thus
   `MpegAudioSource` trims nothing from MP2, as audiowaveform does.
 
+After a FLAC frame that does not decode, audiowaveform usually stops within a
+few frames. The frame where it stops depends on the block size, the sample
+width and the size of the frames. If the first frame does not decode,
+audiowaveform often gives no audio. `FlacSource` continues at the next frame
+that decodes, and gives silence for the lost frames. Thus, after damage, the
+output of `FlacSource` is longer than the audiowaveform output. A truncated
+file is not damage of this type: the outputs are the same.
+
+`FlacSource` finds the place of a frame after damage from the frame number.
+The silence before this frame is at most the number of frames that the
+skipped bytes can hold. This limit uses the smallest frame size and the
+largest block size in `STREAMINFO`. If the damage continues to the end of the
+file, the `STREAMINFO` sample count gives the length of the silence.
+
+For each frame that does not decode, claxon makes a buffer for the samples
+in the frame header. Thus `FlacSource` stops the search when these samples
+are more than the output samples plus 64 of the largest frames. This limit
+prevents a file with many false frame headers from using much processing
+time.
+
+If the channel count of the first FLAC frame is different from the count in
+`STREAMINFO`, `FlacSource` returns an error. audiowaveform gives an empty
+output for this file, but FFmpeg decodes all the frames.
+
 The default is `Overflow::Saturate`, because with wrapping, clipped audio
 shows as less than full scale. To match audiowaveform, use `Overflow::Wrap`.
 For WAV input, the output is then the same as the audiowaveform output. The
@@ -279,24 +326,26 @@ cargo test                             # tests without external tools
 cargo test --all-features              # with all features
 cargo test --no-default-features --features aac
 cargo test --no-default-features --features mp3
+cargo test --no-default-features --features flac
 cargo test --test oracle --all-features -- --ignored  # comparison with audiowaveform
 cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
 cargo clippy --no-default-features --features aac --all-targets -- -D warnings
 cargo clippy --no-default-features --features mp3 --all-targets -- -D warnings
+cargo clippy --no-default-features --features flac --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio, wav
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio, wav, flac
 ```
 
 GitHub Actions runs all of these commands on each push and pull request.
 The tests run on Linux, macOS and Windows. CI also runs the tests on
 Rust 1.88, and runs each fuzz target for one minute. Tests and Clippy run
-on five feature combinations (default, none, `aac` only, `mp3` only, and
-all), so that each combination stays clean. The documentation builds
+on six feature combinations (default, none, `aac` only, `mp3` only, `flac`
+only, and all), so that each combination stays clean. The documentation builds
 with the default features, with no features, and with all features.
 
 `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
@@ -313,12 +362,12 @@ directories of `-fork` fill the disk.
 
 ### Oracle tests
 
-The oracle tests need `audiowaveform`, and `ffmpeg` with libopus and
-libmp3lame, on `PATH`.
-Alternatively, set `AUDIOWAVEFORM` and `FFMPEG` to the paths of the two
-programs. CI installs `audiowaveform` from the
-[audiowaveform PPA](https://launchpad.net/~chris-needham/+archive/ubuntu/ppa)
-and `ffmpeg` from Ubuntu. The tests compare:
+The oracle tests need `audiowaveform`, `ffmpeg` with libopus and libmp3lame,
+and the libFLAC `flac` encoder on `PATH`.
+Alternatively, set `AUDIOWAVEFORM`, `FFMPEG` and `FLAC` to the paths of the
+three programs. CI installs `audiowaveform` from the
+[audiowaveform PPA](https://launchpad.net/~chris-needham/+archive/ubuntu/ppa),
+and `ffmpeg` and `flac` from Ubuntu. The tests compare:
 
 - raw PCM, byte for byte, in 192 combinations of channels, length, zoom, bits,
   and mixdown or split;
@@ -349,7 +398,15 @@ and `ffmpeg` from Ubuntu. The tests compare:
   above;
 - the same MPEG audio fixtures in the same three MP4 layouts, and in
   QuickTime. The reference is the FFmpeg decoder, with a tolerance of ±1 per
-  sample.
+  sample;
+- FLAC that FFmpeg and libFLAC encode: 8-, 16- and 24-bit, one, two and six
+  channels, and several compression levels and block sizes. The tests also
+  use these files without a sample count, truncated, and with ID3 tags;
+- FLAC files that the tests make, with unusual layouts: a different sample
+  width in each frame, sample counts that end in a frame, a change of channel
+  count, the largest block size, and several `STREAMINFO` blocks. The FLAC
+  tests compare each sample with the WAV output of audiowaveform, and the
+  peaks byte for byte.
 
 Opus comparisons accept a difference of ±1 per value. The `opus` crate bundles
 its own libopus build. The float output of this build is different in the last
@@ -365,8 +422,20 @@ output.
 - For chained Ogg files, `OggOpusSource` decodes only the first link.
 - `OggOpusSource` rejects an Ogg file if its first page belongs to a Skeleton
   stream, because the source decodes only the stream of the first page.
-- FLAC and Vorbis are not supported. Symphonia can decode them, but each
-  of its format crates needs an MPL-2.0 exception in `deny.toml`.
+- Vorbis is not supported. Symphonia can decode Vorbis, but its format crate
+  needs an MPL-2.0 exception in `deny.toml`.
+- `FlacSource` rejects sample widths other than 8, 16 and 24 bits, as
+  audiowaveform does. `FlacSource` does not read FLAC in Ogg, MP4 or
+  Matroska.
+- claxon does not decode a FLAC frame without a sample width code in its
+  header, or residuals with an escape code. The tests did not find these
+  frames in 8-, 16- and 24-bit files from libFLAC and FFmpeg. claxon also
+  finds these features in damaged frames, thus `FlacSource` replaces these
+  frames with silence. If no frame decodes, `FlacSource` returns
+  `Error::Unsupported`.
+- After a FLAC frame that does not decode, the output is different from the
+  audiowaveform output (see Compatibility with audiowaveform). If no frame
+  decodes, `FlacSource` returns `Error::InvalidInput`.
 - `WavSource` does not decode compressed WAV formats, such as A-law, μ-law
   and ADPCM. It also rejects big-endian RIFX files, and files with more than
   1024 channels.

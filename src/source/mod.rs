@@ -4,6 +4,8 @@
 mod aac;
 #[cfg(feature = "aac")]
 mod adts_aac;
+#[cfg(feature = "flac")]
+mod flac;
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 mod mp4;
 #[cfg(feature = "mp3")]
@@ -21,12 +23,16 @@ mod wav;
 mod webm_opus;
 
 use std::fmt;
+#[cfg(any(feature = "opus", feature = "aac", feature = "mp3", feature = "flac"))]
+use std::io;
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
-use std::io::{self, BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::io::{ErrorKind, Read};
 
 #[cfg(feature = "aac")]
 pub use adts_aac::AdtsAacSource;
+#[cfg(feature = "flac")]
+pub use flac::FlacSource;
 #[cfg(feature = "aac")]
 #[allow(deprecated)]
 pub use mp4::Mp4AacSource;
@@ -179,10 +185,11 @@ pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize
     Ok(filled)
 }
 
-#[cfg(any(feature = "aac", feature = "mp3"))]
+#[cfg(any(feature = "aac", feature = "mp3", feature = "flac"))]
 /// Skips ID3v2 tags, which some encoders put before the first frame of an
-/// ADTS or MPEG audio stream. Returns the bytes read past them, the start of
-/// the first frame header, and their count.
+/// ADTS or MPEG audio stream, or before a FLAC file. Returns the bytes read
+/// past them, the start of the first frame header or `fLaC` marker, and
+/// their count.
 pub(crate) fn skip_id3v2<R: Read>(reader: &mut R) -> Result<([u8; 3], usize), Error> {
     loop {
         let mut start = [0u8; 3];
