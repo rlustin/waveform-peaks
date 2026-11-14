@@ -188,6 +188,31 @@ fn ogg_crc(data: &[u8]) -> u32 {
     })
 }
 
+/// The pages of an Ogg file.
+pub fn ogg_pages(file: &[u8]) -> Vec<Vec<u8>> {
+    let mut pages = Vec::new();
+    let mut rest = file;
+    while !rest.is_empty() {
+        let segments = rest[26] as usize;
+        let len = 27
+            + segments
+            + rest[27..27 + segments]
+                .iter()
+                .map(|&b| b as usize)
+                .sum::<usize>();
+        pages.push(rest[..len].to_vec());
+        rest = &rest[len..];
+    }
+    pages
+}
+
+/// Recomputes the checksum of an Ogg page after a change.
+pub fn fix_ogg_checksum(page: &mut [u8]) {
+    page[22..26].fill(0);
+    let crc = ogg_crc(page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+}
+
 pub const CONTINUED: u8 = 0x01;
 pub const FIRST: u8 = 0x02;
 pub const LAST: u8 = 0x04;

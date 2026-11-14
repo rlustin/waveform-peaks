@@ -39,6 +39,7 @@ Decoding is CPU-bound, so the API is synchronous. In an async server, run
 | Source | Container | Codec | Feature |
 |---|---|---|---|
 | `OggOpusSource` | Ogg | Opus | `opus` (default) |
+| `OggVorbisSource` | Ogg | Vorbis | `vorbis` |
 | `WebmOpusSource` | WebM, Matroska | Opus | `opus` (default) |
 | `Mp4Source` | MP4 | Opus | `opus` (default) |
 | `Mp4Source` | MP4 | AAC-LC | `aac` |
@@ -75,6 +76,19 @@ pipe. If the end of the file cuts a frame, `FlacSource` drops this frame.
 Thus a truncated upload gives the frames before the cut. If a frame does not
 decode, `FlacSource` continues at the next frame that decodes. Silence
 replaces the lost frames, thus the waveform stays in time with the audio.
+
+`OggVorbisSource` skips the bytes that are not part of a valid Ogg page, as
+libogg does. If a page is missing, decoding continues at the next complete
+packet. If the end of the file cuts a page, `OggVorbisSource` drops this page.
+Thus a truncated upload gives the pages before the cut. The stream also ends
+at a page whose version is not 0. The stream also ends at a false page header
+that claims more bytes than the file has left. audiowaveform stops at the same
+two points.
+
+Crafted junk can imitate page headers. For each false header,
+`OggVorbisSource` computes a checksum of up to 64 KiB, as libogg does. This
+junk costs up to approximately 1 s of CPU time per MiB. To limit the CPU
+time, limit the size of uploads.
 
 FFmpeg and phones write the media data before the `moov` box by default. To
 read this layout, use `Mp4Source::new_seekable` on an input that implements
@@ -195,6 +209,14 @@ Apache-2.0 license:
 waveform-peaks = { version = "0.1", features = ["flac"] }
 ```
 
+The optional `vorbis` feature decodes Vorbis from Ogg with
+[lewton](https://crates.io/crates/lewton), a pure-Rust decoder with the
+MIT and Apache-2.0 licenses:
+
+```toml
+waveform-peaks = { version = "0.1", features = ["vorbis"] }
+```
+
 ## Compatibility with audiowaveform
 
 The rules below come from black-box tests of audiowaveform 1.11.1. They do not
@@ -224,6 +246,12 @@ come from the audiowaveform source code, which has the GPL-3.0 license.
 | FLAC metadata | The last `STREAMINFO` block applies; a different channel count in it is an error |
 | Cut FLAC file | Incomplete last frame dropped |
 | FLAC frame with a different channel count | Output stops before this frame |
+| Vorbis samples | Float output × 32767, rounded half to even; values out of range wrap (`Overflow::Wrap`) |
+| Vorbis start | A first granule position lower than the frames before it trims the difference from the start of its packet, at most this packet |
+| Vorbis end | The last granule position of the end-of-stream page trims the end of its packet; the output stops at the last granule position of the stream |
+| Vorbis start offset | If the first granule position is higher than the frames before it, the end of the output moves back by the difference |
+| Damaged Ogg Vorbis file | Audio packets on the page of the setup header dropped; bytes outside valid pages skipped; a page of another version, or a false page header that runs past the end, ends the stream; after a missing page, the next packet only starts the decoder again; after a packet that libvorbis rejects, the position is lost until the next granule position |
+| Cut Ogg Vorbis file | Incomplete last page dropped |
 
 audiowaveform does not read Opus in WebM or MP4. Thus the tests compare these
 sources with `OggOpusSource` on the same packets:
@@ -310,13 +338,27 @@ If the channel count of the first FLAC frame is different from the count in
 `STREAMINFO`, `FlacSource` returns an error. audiowaveform gives an empty
 output for this file, but FFmpeg decodes all the frames.
 
+audiowaveform decodes Vorbis with libvorbis, through libsndfile. lewton
+rounds some float samples differently from libvorbis. Thus the values from
+`OggVorbisSource` can differ by ±1 from the audiowaveform output. The length
+of the output is the same.
+
+FFmpeg can cut an Ogg Vorbis file without re-encoding. The first granule
+position of the cut file is then lower than the frames before it. For this
+file, audiowaveform trims at most one packet at the start. But its output
+stops at the last granule position, thus before the end of the audio. To stop
+there, `OggVorbisSource` holds back the frames between these two ends.
+`VorbisOptions::max_held_frames` sets the largest number of frames that it
+holds back.
+
 The default is `Overflow::Saturate`, because with wrapping, clipped audio
 shows as less than full scale. To match audiowaveform, use `Overflow::Wrap`.
 For WAV input, the output is then the same as the audiowaveform output. The
 only exception is float samples beyond about 65,000 times full scale. For
 these samples, the audiowaveform output depends on the processor. For
 Opus input with the bundled libopus, the output is then within ±1 per value of
-the audiowaveform output (see Oracle tests).
+the audiowaveform output (see Oracle tests). For Vorbis input, the output is
+also within ±1 per value.
 
 ## Development
 
@@ -327,26 +369,29 @@ cargo test --all-features              # with all features
 cargo test --no-default-features --features aac
 cargo test --no-default-features --features mp3
 cargo test --no-default-features --features flac
+cargo test --no-default-features --features vorbis
 cargo test --test oracle --all-features -- --ignored  # comparison with audiowaveform
 cargo clippy --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
 cargo clippy --no-default-features --features aac --all-targets -- -D warnings
 cargo clippy --no-default-features --features mp3 --all-targets -- -D warnings
 cargo clippy --no-default-features --features flac --all-targets -- -D warnings
+cargo clippy --no-default-features --features vorbis --all-targets -- -D warnings
 cargo clippy --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
 cargo fmt
 cargo deny check                       # dependency licenses and advisories
-cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio, wav, flac
+cargo +nightly fuzz run ogg_opus       # also webm_opus, mp4, adts_aac, mpeg_audio, wav, flac, ogg_vorbis
 ```
 
 GitHub Actions runs all of these commands on each push and pull request.
 The tests run on Linux, macOS and Windows. CI also runs the tests on
 Rust 1.88, and runs each fuzz target for one minute. Tests and Clippy run
-on six feature combinations (default, none, `aac` only, `mp3` only, `flac`
-only, and all), so that each combination stays clean. The documentation builds
-with the default features, with no features, and with all features.
+on seven feature combinations (default, none, `aac` only, `mp3` only,
+`flac` only, `vorbis` only, and all), so that each combination stays clean.
+The documentation builds with the default features, with no features, and
+with all features.
 
 `cargo deny check` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 Fuzzing needs a nightly toolchain and
@@ -363,11 +408,11 @@ directories of `-fork` fill the disk.
 ### Oracle tests
 
 The oracle tests need `audiowaveform`, `ffmpeg` with libopus and libmp3lame,
-and the libFLAC `flac` encoder on `PATH`.
-Alternatively, set `AUDIOWAVEFORM`, `FFMPEG` and `FLAC` to the paths of the
-three programs. CI installs `audiowaveform` from the
+the libFLAC `flac` encoder and the libvorbis `oggenc` encoder on `PATH`.
+Alternatively, set `AUDIOWAVEFORM`, `FFMPEG`, `FLAC` and `OGGENC` to the paths
+of the four programs. CI installs `audiowaveform` from the
 [audiowaveform PPA](https://launchpad.net/~chris-needham/+archive/ubuntu/ppa),
-and `ffmpeg` and `flac` from Ubuntu. The tests compare:
+and `ffmpeg`, `flac` and `vorbis-tools` from Ubuntu. The tests compare:
 
 - raw PCM, byte for byte, in 192 combinations of channels, length, zoom, bits,
   and mixdown or split;
@@ -406,7 +451,17 @@ and `ffmpeg` and `flac` from Ubuntu. The tests compare:
   width in each frame, sample counts that end in a frame, a change of channel
   count, the largest block size, and several `STREAMINFO` blocks. The FLAC
   tests compare each sample with the WAV output of audiowaveform, and the
-  peaks byte for byte.
+  peaks byte for byte;
+- Vorbis that libvorbis encodes: one, two and three channels, sample rates
+  from 8 to 96 kHz, and qualities from -1 to 10. The tests also change these
+  files: a cut after a page and in a page, start offsets, and a first
+  granule position that is unknown or less than zero. Other changes are no
+  end-of-stream flag, an empty packet, a missing page, a wrong checksum, junk
+  between pages, a false page header near the end, a page of another
+  version, and a chained link. Other tests use the FFmpeg Vorbis encoder,
+  files that FFmpeg cuts without re-encoding, and a square wave that clips.
+  The Vorbis tests compare each sample with the WAV output of audiowaveform,
+  with a tolerance of ±1.
 
 Opus comparisons accept a difference of ±1 per value. The `opus` crate bundles
 its own libopus build. The float output of this build is different in the last
@@ -419,11 +474,27 @@ output.
 
 - Surround Opus (channel mapping family 1) is not supported: it needs the
   multistream decoder.
-- For chained Ogg files, `OggOpusSource` decodes only the first link.
-- `OggOpusSource` rejects an Ogg file if its first page belongs to a Skeleton
-  stream, because the source decodes only the stream of the first page.
-- Vorbis is not supported. Symphonia can decode Vorbis, but its format crate
-  needs an MPL-2.0 exception in `deny.toml`.
+- For chained Ogg files, `OggOpusSource` and `OggVorbisSource` decode only
+  the first link, as audiowaveform does.
+- `OggOpusSource` and `OggVorbisSource` decode only the stream of the first
+  page. Thus they reject an Ogg file if its first page belongs to a Skeleton
+  stream.
+- If the granule positions of an Ogg Vorbis file do not agree with each
+  other, the output can end later than the audiowaveform output. An example
+  is a last granule position that is lower than the granule position of the
+  page before it. audiowaveform reads this position before it decodes, but
+  `OggVorbisSource` reads it at the end of the file.
+- If no page of an Ogg Vorbis stream has a granule position,
+  `OggVorbisSource` decodes the full stream. audiowaveform fails on such a
+  stream.
+- lewton does not decode some damaged Vorbis packets that libvorbis decodes.
+  `OggVorbisSource` replaces such a packet and the next packet with silence
+  of the same length. Thus the output keeps its length, but these frames are
+  different from the audiowaveform output.
+- In builds with overflow checks, lewton panics on some crafted Vorbis
+  packets. `OggVorbisSource` catches the panic and replaces the packet with
+  silence. With `panic = "abort"`, the process stops instead. The panic hook
+  prints a message for each of these packets.
 - `FlacSource` rejects sample widths other than 8, 16 and 24 bits, as
   audiowaveform does. `FlacSource` does not read FLAC in Ogg, MP4 or
   Matroska.

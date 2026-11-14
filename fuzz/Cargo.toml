@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.waveform-peaks]
 path = ".."
-features = ["aac", "mp3", "flac"]
+features = ["aac", "mp3", "flac", "vorbis"]
 
 [[bin]]
 name = "ogg_opus"
@@ -59,6 +59,13 @@ bench = false
 [[bin]]
 name = "flac"
 path = "fuzz_targets/flac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ogg_vorbis"
+path = "fuzz_targets/ogg_vorbis.rs"
 test = false
 doc = false
 bench = false
