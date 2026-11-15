@@ -80,6 +80,10 @@ impl Default for Options {
 pub struct Limits {
     /// Highest accepted input channel count.
     pub max_channels: u16,
+    /// Highest accepted input sample rate, in Hz. The input declares its
+    /// rate, and [`max_duration`](Self::max_duration) allows more frames at
+    /// a higher rate, so set the highest rate that the application expects.
+    pub max_sample_rate: u32,
     /// Longest accepted input. Decoding stops with
     /// [`Error::LimitExceeded`](crate::Error::LimitExceeded) once the decoded
     /// audio passes it.
@@ -87,10 +91,12 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// 8 channels and 4 hours.
+    /// 8 channels, 1,048,575 Hz and 4 hours. The rate is the highest that a
+    /// FLAC file can declare.
     fn default() -> Self {
         Limits {
             max_channels: 8,
+            max_sample_rate: 1_048_575,
             max_duration: Duration::from_secs(4 * 60 * 60),
         }
     }

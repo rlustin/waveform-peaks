@@ -6,8 +6,24 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Limits::max_sample_rate` bounds the sample rate that the input declares.
+  The default is 1,048,575 Hz, the highest rate that a FLAC file can declare.
+
+### Changed
+
+- `generate` and `generate_many` refuse a sample rate above
+  `Limits::max_sample_rate` with `Error::LimitExceeded`. With the default
+  `Limits`, a WAV file or a `RawPcmSource` above 1,048,575 Hz did decode
+  before. Raise the limit to accept such input.
+
 ### Fixed
 
+- A file that declared a very high sample rate raised the number of frames
+  that `Limits::max_duration` allows, up to 97,000 times for WAV and Ogg
+  Vorbis input, so that the limit did not bound the work. The frames are now
+  at most `Limits::max_duration` times `Limits::max_sample_rate`.
 - `OggVorbisSource` kept memory in proportion to the input, far above
   `VorbisOptions::max_packet_bytes`, for a crafted stream that starts a
   large packet on each page and drops it on the next page.

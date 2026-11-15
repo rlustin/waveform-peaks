@@ -19,8 +19,9 @@ To make peaks at several zoom levels, use `generate_many`. `generate_many`
 decodes the input one time and sends each block to all of the outputs. Each
 output has its own `Options` and sink.
 
-`generate` and `generate_many` check the channel count against `Limits` before
-they decode. They check the duration when each block arrives.
+`generate` and `generate_many` check the channel count and the sample rate
+against `Limits` before they decode. They check the duration when each block
+arrives.
 
 `generate` and `generate_many` write each point as soon as the point is
 complete. If the run fails, an output file can be incomplete. Thus, write each
