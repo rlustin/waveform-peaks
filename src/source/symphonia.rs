@@ -14,6 +14,7 @@ pub(crate) struct Output {
     start: u64,
     end: Option<u64>,
     decoded: u64,
+    dropped: u64,
     float_pcm: Vec<f32>,
     pcm: Vec<i16>,
     kept: Range<usize>,
@@ -26,6 +27,7 @@ impl Output {
             start: 0,
             end: None,
             decoded: 0,
+            dropped: 0,
             float_pcm: Vec::new(),
             pcm: Vec::new(),
             kept: 0..0,
@@ -76,9 +78,15 @@ impl Output {
             .end
             .map_or(frames, |end| end.saturating_sub(before))
             .clamp(start, frames);
+        self.dropped += frames - (end - start);
         let channels = self.channels as usize;
         self.kept = start as usize * channels..end as usize * channels;
         Ok(start < end)
+    }
+
+    /// Frames decoded so far and trimmed.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// Samples kept from the last frame passed to [`push`](Self::push).

@@ -78,6 +78,11 @@ impl AacDecoder {
         )
     }
 
+    /// Frames decoded so far and trimmed.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.output.dropped()
+    }
+
     /// Samples kept from the last frame passed to [`decode`](Self::decode).
     pub(crate) fn output(&self) -> &[i16] {
         self.output.samples()

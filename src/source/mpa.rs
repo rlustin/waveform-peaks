@@ -89,6 +89,15 @@ impl Header {
         }
     }
 
+    /// Frames per channel that a frame with this header decodes to.
+    pub(crate) fn frame_samples(self) -> u64 {
+        match (self.layer(), self.is_mpeg1()) {
+            (1, _) => 384,
+            (3, false) => 576,
+            _ => 1152,
+        }
+    }
+
     fn is_mono(self) -> bool {
         self.0 >> 6 & 0b11 == 0b11
     }
@@ -279,6 +288,11 @@ impl MpaDecoder {
     /// without counting it for [`trim`](Self::trim).
     pub(crate) fn skip(&mut self, frame: &[u8]) -> Result<(), Error> {
         decode_frame(&mut self.decoder, self.header, frame).map(drop)
+    }
+
+    /// Frames decoded so far and trimmed.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.output.dropped()
     }
 
     /// Samples kept from the last frame passed to [`decode`](Self::decode).

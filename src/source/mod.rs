@@ -88,8 +88,8 @@ pub trait PcmSource {
     /// Interleaved channel count.
     fn channels(&self) -> u16;
 
-    /// Returns the next block, or `None` at the end of the input. A block may
-    /// be empty only if more blocks follow.
+    /// Returns the next block, or `None` at the end of the input. A block can
+    /// be empty: only `None` ends the input.
     ///
     /// # Errors
     ///
@@ -97,6 +97,16 @@ pub trait PcmSource {
     /// malformed input, and [`Error::LimitExceeded`] when the input passes a
     /// bound set on the source.
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error>;
+
+    /// Frames decoded so far that are in no block, for example the audio
+    /// that a container trims. [`generate`](crate::generate) checks them
+    /// against [`Limits::max_duration`](crate::Limits::max_duration) after
+    /// each block, so a source that drops many frames must return blocks in
+    /// between, empty if need be. A source that wraps another source must
+    /// forward this method: the default is 0, which turns the check off.
+    fn dropped_frames(&self) -> u64 {
+        0
+    }
 }
 
 /// Raw interleaved signed 16-bit little-endian PCM (audiowaveform

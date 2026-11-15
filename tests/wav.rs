@@ -413,6 +413,27 @@ fn many_channels_of_wide_samples_use_small_blocks() {
 }
 
 #[test]
+fn a_declared_sample_rate_does_not_raise_the_duration_limit() {
+    // Two seconds at 48 kHz that claim to be a fraction of a millisecond.
+    let file = wav(PCM, 1, u32::MAX, 8, &[128; 96_000]);
+    let mut limits = Limits::default();
+    limits.max_duration = std::time::Duration::from_secs(1);
+    let result = generate(
+        &mut WavSource::new(Cursor::new(file)).unwrap(),
+        &Options::default(),
+        &limits,
+        MemorySink::new(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(Error::LimitExceeded("sample rate above max_sample_rate"))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn generates_peaks() {
     let samples = pcm(48_000, 2, 11);
     let file = wav(PCM, 2, 48_000, 16, &le_bytes(&samples));

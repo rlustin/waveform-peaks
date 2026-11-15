@@ -100,24 +100,29 @@ impl<R: Read> PcmSource for OggOpusSource<R> {
     }
 
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
-        while !self.finished {
-            let Some(packet) = self.pages.next_packet()? else {
-                // Truncated stream without an end-of-stream page: no end trimming.
-                self.finished = true;
-                break;
-            };
-            self.finished = packet.last_in_stream();
-            // The end-of-stream granule position can end the audio inside any
-            // packet of that page, not only the last.
-            let end = match self.pages.end_granule {
-                Some(granule) => End::At(to_decode_rate(granule, self.decoder.sample_rate())),
-                None => End::Open,
-            };
-            if self.decoder.decode(&packet.data, end)? {
-                return Ok(Some(self.decoder.output()));
-            }
+        if self.finished {
+            return Ok(None);
         }
-        Ok(None)
+        let Some(packet) = self.pages.next_packet()? else {
+            // Truncated stream without an end-of-stream page: no end trimming.
+            self.finished = true;
+            return Ok(None);
+        };
+        self.finished = packet.last_in_stream();
+        // The end-of-stream granule position can end the audio inside any
+        // packet of that page, not only the last.
+        let end = match self.pages.end_granule {
+            Some(granule) => End::At(to_decode_rate(granule, self.decoder.sample_rate())),
+            None => End::Open,
+        };
+        // An empty block when the packet is trimmed, so that the caller can
+        // count it.
+        self.decoder.decode(&packet.data, end)?;
+        Ok(Some(self.decoder.output()))
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.decoder.dropped()
     }
 }
 

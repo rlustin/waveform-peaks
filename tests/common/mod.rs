@@ -206,6 +206,27 @@ pub fn ogg_pages(file: &[u8]) -> Vec<Vec<u8>> {
     pages
 }
 
+/// The packets of an Ogg file with one logical stream.
+pub fn ogg_file_packets(file: &[u8]) -> Vec<Vec<u8>> {
+    let mut packets = Vec::new();
+    let mut packet = Vec::new();
+    let mut rest = file;
+    while !rest.is_empty() {
+        let segments = rest[26] as usize;
+        let lacing = &rest[27..27 + segments];
+        let mut body = &rest[27 + segments..];
+        for &len in lacing {
+            packet.extend_from_slice(&body[..len as usize]);
+            body = &body[len as usize..];
+            if len < 255 {
+                packets.push(std::mem::take(&mut packet));
+            }
+        }
+        rest = body;
+    }
+    packets
+}
+
 /// Recomputes the checksum of an Ogg page after a change.
 pub fn fix_ogg_checksum(page: &mut [u8]) {
     page[22..26].fill(0);
@@ -499,6 +520,17 @@ pub fn mpa_frames(stream: &[u8]) -> Vec<Vec<u8>> {
         at += len;
     }
     frames
+}
+
+/// Sets `big_values` of the first granule in an MPEG-1 mono frame without
+/// CRC: after 9 bits of main_data_begin, 5 private bits, 4 bits of scfsi and
+/// 12 bits of part2_3_length.
+pub fn set_big_values(frame: &mut [u8], value: u16) {
+    for bit in 0..9 {
+        let (byte, shift) = (4 + (30 + bit) / 8, 7 - (30 + bit) % 8);
+        let set = (value >> (8 - bit) & 1) as u8;
+        frame[byte] = frame[byte] & !(1 << shift) | set << shift;
+    }
 }
 
 pub fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {

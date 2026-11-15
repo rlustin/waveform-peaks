@@ -93,6 +93,7 @@ pub struct Mp4Source<R: Read> {
     decoder: Decoder,
     /// Whether `media.frame` holds a sample read but not decoded yet.
     pending: bool,
+    dropped: u64,
 }
 
 /// Reads the samples of the chosen track out of the media data.
@@ -228,6 +229,7 @@ impl<R: Read> Mp4Source<R> {
                         media,
                         decoder: empty,
                         pending: false,
+                        dropped: 0,
                     });
                 }
                 // Old QuickTime files count MPEG audio in samples of one byte.
@@ -247,6 +249,7 @@ impl<R: Read> Mp4Source<R> {
             media,
             decoder,
             pending,
+            dropped: 0,
         })
     }
 }
@@ -459,16 +462,19 @@ impl<R: Read> PcmSource for Mp4Source<R> {
     }
 
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
-        while !self.decoder.past_end() {
-            if !self.pending && !self.media.next_frame()? {
-                break;
-            }
-            self.pending = false;
-            if self.decoder.decode(&self.media.frame)? {
-                return Ok(Some(self.decoder.output()));
-            }
+        if self.decoder.past_end() || (!self.pending && !self.media.next_frame()?) {
+            return Ok(None);
         }
-        Ok(None)
+        self.pending = false;
+        // An empty block when the sample is trimmed, so that the caller can
+        // count it.
+        self.decoder.decode(&self.media.frame)?;
+        self.dropped = self.decoder.dropped();
+        Ok(Some(self.decoder.output()))
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.dropped
     }
 }
 
@@ -552,6 +558,20 @@ impl Decoder {
             Decoder::Mpa(decoder) => decoder.decode(sample),
             #[cfg(feature = "mp3")]
             Decoder::Empty { .. } => Ok(false),
+        }
+    }
+
+    /// Frames decoded so far and trimmed.
+    fn dropped(&mut self) -> u64 {
+        match self {
+            #[cfg(feature = "aac")]
+            Decoder::Aac(decoder) => decoder.dropped(),
+            #[cfg(feature = "opus")]
+            Decoder::Opus { decoder, .. } => opus(decoder).dropped(),
+            #[cfg(feature = "mp3")]
+            Decoder::Mpa(decoder) => decoder.dropped(),
+            #[cfg(feature = "mp3")]
+            Decoder::Empty { .. } => 0,
         }
     }
 

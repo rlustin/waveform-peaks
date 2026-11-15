@@ -43,6 +43,8 @@ pub struct MpegAudioSource<R: Read> {
     reservoir: Option<usize>,
     /// The frame at the start of `frames`, when it is read but not decoded.
     pending: Option<Header>,
+    /// Frames decoded for the reservoir only, or that did not decode.
+    dropped: u64,
 }
 
 impl<R: Read> MpegAudioSource<R> {
@@ -64,6 +66,7 @@ impl<R: Read> MpegAudioSource<R> {
             frames,
             reservoir: Some(0),
             pending: Some(header),
+            dropped: 0,
         };
         let frame = source.frames.frame(header.frame_bytes());
         if let Some(delay) = header.info_tag(frame) {
@@ -87,19 +90,23 @@ impl<R: Read> MpegAudioSource<R> {
             Some(read) if begin > read => {
                 // Decoded all the same, so that the reservoir holds its data.
                 self.reservoir = Some(read.saturating_add(header.main_data_bytes()));
-                self.decoder.skip(frame).map(|()| false)
+                self.decoder.skip(frame).map(|()| None)
             }
             _ => {
                 self.reservoir = None;
-                self.decoder.decode(frame)
+                self.decoder.decode(frame).map(Some)
             }
         };
         self.frames.consume(len);
-        match decoded {
+        let decoded = match decoded {
             // libmad keeps the data of a frame it rejects in its reservoir.
-            Err(Error::InvalidInput(_)) => Ok(false),
+            Err(Error::InvalidInput(_)) => Ok(None),
             decoded => decoded,
+        }?;
+        if decoded.is_none() {
+            self.dropped += header.frame_samples();
         }
+        Ok(decoded.unwrap_or(false))
     }
 }
 
@@ -121,24 +128,29 @@ impl<R: Read> PcmSource for MpegAudioSource<R> {
     }
 
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
-        loop {
-            let header = match self.pending.take() {
-                Some(header) => header,
-                None => {
-                    let Some((header, skipped)) = self.frames.next(Some(self.decoder.header()))?
-                    else {
-                        return Ok(None);
-                    };
-                    if skipped {
-                        self.reservoir = Some(0);
-                    }
-                    header
+        let header = match self.pending.take() {
+            Some(header) => header,
+            None => {
+                let Some((header, skipped)) = self.frames.next(Some(self.decoder.header()))? else {
+                    return Ok(None);
+                };
+                if skipped {
+                    self.reservoir = Some(0);
                 }
-            };
-            if self.decode(header)? {
-                return Ok(Some(self.decoder.output()));
+                header
             }
-        }
+        };
+        // An empty block when the frame gives no samples, so that the caller
+        // can count it.
+        Ok(Some(if self.decode(header)? {
+            self.decoder.output()
+        } else {
+            &[]
+        }))
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.dropped + self.decoder.dropped()
     }
 }
 

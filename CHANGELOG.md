@@ -4,6 +4,44 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Limits::max_sample_rate` bounds the sample rate that the input declares.
+  The default is 1,048,575 Hz, the highest rate that a FLAC file can declare.
+- `PcmSource::dropped_frames` reports the frames that a source decodes and
+  leaves out of its blocks. The default is 0, and a source that wraps
+  another source must forward the method.
+
+### Changed
+
+- `generate` and `generate_many` refuse a sample rate above
+  `Limits::max_sample_rate` with `Error::LimitExceeded`. With the default
+  `Limits`, a WAV file or a `RawPcmSource` above 1,048,575 Hz did decode
+  before. Raise the limit to accept such input.
+
+### Fixed
+
+- `Limits::max_duration` did not count audio that a source decodes and then
+  drops, so a crafted file was decoded to its end whatever the limit: an MP4
+  edit list or iTunes priming beyond the audio, a WebM `CodecDelay` or
+  `DiscardPadding`, an empty last page before the audio in Ogg Opus, a last
+  granule position of 0 or page gaps in Ogg Vorbis, and MPEG audio frames
+  decoded only for the bit reservoir or that do not decode. The limit now
+  applies to this audio too, apart from the audio in the output, and the
+  sources return an empty block for a packet that gives no frames. A file
+  that trims more audio than `Limits::max_duration`, for example with an MP4
+  edit list that starts late in a long recording, is now refused with
+  "dropped audio above max_duration".
+- A file that declared a very high sample rate raised the number of frames
+  that `Limits::max_duration` allows, up to 97,000 times for WAV and Ogg
+  Vorbis input, so that the limit did not bound the work. The frames are now
+  at most `Limits::max_duration` times `Limits::max_sample_rate`.
+- `OggVorbisSource` kept memory in proportion to the input, far above
+  `VorbisOptions::max_packet_bytes`, for a crafted stream that starts a
+  large packet on each page and drops it on the next page.
+
 ## [0.1.7] - 2026-11-15
 
 ### Added

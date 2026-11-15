@@ -208,6 +208,25 @@ fn partial_frame_is_rejected() {
 }
 
 #[test]
+fn limits_stop_a_high_sample_rate() {
+    let mut limits = Limits::default();
+    limits.max_sample_rate = 8000;
+    let run = |sample_rate| {
+        let mut source = RawPcmSource::new(Cursor::new(vec![0; 16]), sample_rate, 1).unwrap();
+        generate(&mut source, &Options::default(), &limits, MemorySink::new())
+    };
+    assert!(run(8000).is_ok());
+    let result = run(8001);
+    assert!(
+        matches!(
+            result,
+            Err(Error::LimitExceeded("sample rate above max_sample_rate"))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn limits_stop_oversized_input() {
     let one_second = common::le_bytes(&vec![0; 8000]);
     let mut limits = Limits::default();

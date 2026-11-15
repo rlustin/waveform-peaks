@@ -108,9 +108,9 @@ pub use source::{Overflow, PcmSource, RawPcmSource, WavOptions, WavSource};
 ///
 /// # Errors
 ///
-/// - [`Error::LimitExceeded`] when the source has more channels or more audio
-///   than `limits` allow. The duration check runs as blocks arrive, so an
-///   oversized input stops early.
+/// - [`Error::LimitExceeded`] when the source has more channels, a higher
+///   sample rate or more audio than `limits` allow. The duration check runs
+///   as blocks arrive, so an oversized input stops early.
 /// - Errors from the source, the builder, and the sink pass through. The sink
 ///   has received the points decoded before the error and is not finished: a
 ///   `.dat` file keeps a zero length in its header.
@@ -187,6 +187,9 @@ where
         options.check()?;
     }
     let sample_rate = source.sample_rate();
+    if sample_rate > limits.max_sample_rate {
+        return Err(Error::LimitExceeded("sample rate above max_sample_rate"));
+    }
     // Float-to-int casts saturate, so Duration::MAX means no limit.
     let max_frames = (limits.max_duration.as_secs_f64() * sample_rate as f64) as u64;
 
@@ -202,6 +205,10 @@ where
         }
         for builder in &mut builders {
             builder.push_interleaved(block)?;
+        }
+        // A limit of its own, so that the priming of a file at the limit fits.
+        if source.dropped_frames() > max_frames {
+            return Err(Error::LimitExceeded("dropped audio above max_duration"));
         }
     }
     builders.into_iter().map(PeakBuilder::finish).collect()

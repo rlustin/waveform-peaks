@@ -260,17 +260,6 @@ fn frame_that_does_not_decode_keeps_its_reservoir_data() {
     );
 }
 
-/// Sets `big_values` of the first granule in an MPEG-1 mono frame without
-/// CRC: after 9 bits of main_data_begin, 5 private bits, 4 bits of scfsi and
-/// 12 bits of part2_3_length.
-fn set_big_values(frame: &mut [u8], value: u16) {
-    for bit in 0..9 {
-        let (byte, shift) = (4 + (30 + bit) / 8, 7 - (30 + bit) % 8);
-        let set = (value >> (8 - bit) & 1) as u8;
-        frame[byte] = frame[byte] & !(1 << shift) | set << shift;
-    }
-}
-
 /// Junk with many headers decodes to nothing. The window of fixed size
 /// keeps the memory constant.
 #[test]
