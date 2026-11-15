@@ -146,6 +146,7 @@ pub(crate) struct OpusDecoder {
     channels: u16,
     pre_skip: u64,
     decoded: u64,
+    dropped: u64,
     float_pcm: Vec<f32>,
     pcm: Vec<i16>,
     kept: Range<usize>,
@@ -183,6 +184,7 @@ impl OpusDecoder {
             channels: head.channels as u16,
             pre_skip: to_decode_rate(pre_skip, sample_rate),
             decoded: 0,
+            dropped: 0,
             float_pcm: vec![0.0; MAX_PACKET_FRAMES * head.channels as usize],
             pcm: vec![0; MAX_PACKET_FRAMES * head.channels as usize],
             kept: 0..0,
@@ -202,6 +204,11 @@ impl OpusDecoder {
         self.decoded
     }
 
+    /// Frames decoded so far and trimmed.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
     /// Frames `packet` decodes to, without decoding it.
     pub(crate) fn packet_frames(&self, packet: &[u8]) -> Result<u64, Error> {
         if packet.is_empty() {
@@ -216,6 +223,7 @@ impl OpusDecoder {
     pub(crate) fn decode(&mut self, packet: &[u8], end: End) -> Result<bool, Error> {
         // libopus treats an empty packet as a lost one and conceals it.
         if packet.is_empty() {
+            self.kept = 0..0;
             return Ok(false);
         }
         let frames = self
@@ -243,6 +251,7 @@ impl OpusDecoder {
             End::At(position) => position.saturating_sub(before),
         }
         .clamp(start, frames);
+        self.dropped += frames - (end - start);
         let channels = self.channels as usize;
         self.kept = start as usize * channels..end as usize * channels;
         Ok(start < end)

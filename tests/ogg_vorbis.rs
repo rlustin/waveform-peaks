@@ -7,7 +7,10 @@ mod common;
 
 use std::io::Cursor;
 
-use common::{CONTINUED, FIRST, LAST, assert_same, ogg_packet_page, ogg_packets_page, ogg_page};
+use common::{
+    CONTINUED, FIRST, LAST, assert_same, ogg_file_packets, ogg_packet_page, ogg_packets_page,
+    ogg_page,
+};
 use waveform_peaks::{Error, OggVorbisSource, Overflow, PcmSource, VorbisOptions};
 
 const CHORD: &[u8] = include_bytes!("data/chord-stereo-44100.ogg");
@@ -25,7 +28,7 @@ struct Stream {
 
 impl Stream {
     fn new(file: &[u8]) -> Stream {
-        let mut packets = packets(file);
+        let mut packets = ogg_file_packets(file);
         let audio = packets.split_off(3);
         let ident = lewton::header::read_header_ident(&packets[0]).unwrap();
         let setup = lewton::header::read_header_setup(
@@ -138,27 +141,6 @@ impl Stream {
         }
         layout
     }
-}
-
-/// The packets of an Ogg file with one logical stream.
-fn packets(file: &[u8]) -> Vec<Vec<u8>> {
-    let mut packets = Vec::new();
-    let mut packet = Vec::new();
-    let mut rest = file;
-    while !rest.is_empty() {
-        let segments = rest[26] as usize;
-        let lacing = &rest[27..27 + segments];
-        let mut body = &rest[27 + segments..];
-        for &len in lacing {
-            packet.extend_from_slice(&body[..len as usize]);
-            body = &body[len as usize..];
-            if len < 255 {
-                packets.push(std::mem::take(&mut packet));
-            }
-        }
-        rest = body;
-    }
-    packets
 }
 
 fn decode(file: Vec<u8>) -> Result<Vec<i16>, Error> {

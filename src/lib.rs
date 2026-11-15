@@ -206,6 +206,10 @@ where
         for builder in &mut builders {
             builder.push_interleaved(block)?;
         }
+        // A limit of its own, so that the priming of a file at the limit fits.
+        if source.dropped_frames() > max_frames {
+            return Err(Error::LimitExceeded("dropped audio above max_duration"));
+        }
     }
     builders.into_iter().map(PeakBuilder::finish).collect()
 }

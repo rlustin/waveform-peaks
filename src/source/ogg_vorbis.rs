@@ -138,6 +138,8 @@ pub struct OggVorbisSource<R: Read> {
     /// Output frames allowed in total, known from the last page.
     limit: Option<u64>,
     emitted: u64,
+    /// Frames of the packets decoded, half a block each.
+    decoded: u64,
     /// Frames held back, while the last page is unknown.
     hold: usize,
     held: VecDeque<i16>,
@@ -222,6 +224,7 @@ impl<R: Read> OggVorbisSource<R> {
             start_offset: None,
             limit: None,
             emitted: 0,
+            decoded: 0,
             hold: 0,
             held: VecDeque::new(),
             pcm: Vec::new(),
@@ -333,6 +336,7 @@ impl<R: Read> OggVorbisSource<R> {
             self.position = None;
             return Ok(());
         };
+        self.decoded += block / 2;
         let (ident, setup, window) = (&self.ident, &self.setup, &mut self.window);
         let decoded = guarded(|| {
             read_audio_packet_generic::<InterleavedSamples<f32>>(ident, setup, &packet.data, window)
@@ -477,10 +481,18 @@ impl<R: Read> PcmSource for OggVorbisSource<R> {
             } else if self.next_packet == self.current.packets.len() {
                 self.finished = !self.advance()?;
             } else {
+                // An empty block when the packet gives no frames, so that
+                // the caller can count it.
                 self.decode_next()?;
+                return Ok(Some(&self.pcm));
             }
         }
         Ok((!self.pcm.is_empty()).then_some(&self.pcm[..]))
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        let pending = (self.held.len() + self.early.len()) / self.channels_usize();
+        self.decoded.saturating_sub(self.emitted + pending as u64)
     }
 }
 

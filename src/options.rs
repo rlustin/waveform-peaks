@@ -86,7 +86,9 @@ pub struct Limits {
     pub max_sample_rate: u32,
     /// Longest accepted input. Decoding stops with
     /// [`Error::LimitExceeded`](crate::Error::LimitExceeded) once the decoded
-    /// audio passes it.
+    /// audio passes it. The audio that a source decodes and drops, for
+    /// example the audio that a container trims, has the same limit apart
+    /// from the audio in the output.
     pub max_duration: Duration,
 }
 

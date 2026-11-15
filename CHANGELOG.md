@@ -10,6 +10,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Limits::max_sample_rate` bounds the sample rate that the input declares.
   The default is 1,048,575 Hz, the highest rate that a FLAC file can declare.
+- `PcmSource::dropped_frames` reports the frames that a source decodes and
+  leaves out of its blocks. The default is 0, and a source that wraps
+  another source must forward the method.
 
 ### Changed
 
@@ -20,6 +23,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Limits::max_duration` did not count audio that a source decodes and then
+  drops, so a crafted file was decoded to its end whatever the limit: an MP4
+  edit list or iTunes priming beyond the audio, a WebM `CodecDelay` or
+  `DiscardPadding`, an empty last page before the audio in Ogg Opus, a last
+  granule position of 0 or page gaps in Ogg Vorbis, and MPEG audio frames
+  decoded only for the bit reservoir or that do not decode. The limit now
+  applies to this audio too, apart from the audio in the output, and the
+  sources return an empty block for a packet that gives no frames. A file
+  that trims more audio than `Limits::max_duration`, for example with an MP4
+  edit list that starts late in a long recording, is now refused with
+  "dropped audio above max_duration".
 - A file that declared a very high sample rate raised the number of frames
   that `Limits::max_duration` allows, up to 97,000 times for WAV and Ogg
   Vorbis input, so that the limit did not bound the work. The frames are now

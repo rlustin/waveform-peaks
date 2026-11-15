@@ -322,12 +322,17 @@ impl<R: Read> PcmSource for WebmOpusSource<R> {
     fn next_block(&mut self) -> Result<Option<&[i16]>, Error> {
         loop {
             match self.decode_next_packet()? {
-                Some(true) => return Ok(Some(self.decoder.output())),
-                Some(false) => {}
+                // An empty block when the packet is trimmed, so that the
+                // caller can count it.
+                Some(_) => return Ok(Some(self.decoder.output())),
                 None if self.finished => return Ok(None),
                 None => self.finished = !self.read_block()?,
             }
         }
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.decoder.dropped()
     }
 }
 
