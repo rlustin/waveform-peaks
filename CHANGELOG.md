@@ -4,7 +4,7 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.7] - 2026-11-15
 
 ### Added
 
@@ -13,7 +13,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   licenses. With `Overflow::Wrap`, its output is within ±1 per value of the
   audiowaveform output, with the same length, also for files that FFmpeg
   cuts without re-encoding and for truncated files. Like libogg, it skips
-  bytes outside valid pages and continues after a missing page.
+  bytes outside valid pages and continues after a missing page. Silence of
+  the same length replaces a damaged packet that lewton does not decode.
   `VorbisOptions` bounds the packet size, the codebook size and the frames
   held back to end the output where audiowaveform ends it.
 
@@ -138,6 +139,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AAC input from MP4 (fragmented or with the `moov` box first) and ADTS,
   behind the optional `aac` feature.
 
+[0.1.7]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.7
 [0.1.6]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.6
 [0.1.5]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.5
 [0.1.4]: https://github.com/rlustin/waveform-peaks/releases/tag/v0.1.4
