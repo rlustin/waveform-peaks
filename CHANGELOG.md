@@ -4,6 +4,14 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `OggVorbisSource` kept memory in proportion to the input, far above
+  `VorbisOptions::max_packet_bytes`, for a crafted stream that starts a
+  large packet on each page and drops it on the next page.
+
 ## [0.1.7] - 2026-11-15
 
 ### Added

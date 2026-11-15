@@ -83,7 +83,9 @@ impl<R: Read> GroupReader<R> {
                 .next_sequence
                 .is_some_and(|expected| expected != page.sequence())
             {
-                self.partial.clear();
+                // Not `clear`: the next packet would keep this capacity,
+                // which `pending_bytes` leaves out.
+                self.partial = Vec::new();
                 self.in_packet = false;
                 self.gap = true;
             }
@@ -96,7 +98,8 @@ impl<R: Read> GroupReader<R> {
             let mut body = page.body();
             let mut segments = lacing.iter().map(|&len| len as usize);
             if page.flags() & CONTINUED == 0 {
-                self.partial.clear();
+                // Not `clear`, as above.
+                self.partial = Vec::new();
                 self.in_packet = false;
             } else if !self.in_packet {
                 // The tail of a packet whose start is lost.
@@ -336,6 +339,39 @@ mod tests {
                 (crc << 8) ^ CRC_TABLES[0][((crc >> 24) as u8 ^ byte) as usize]
             });
             assert_eq!(checksum(page), bytewise, "{len} bytes");
+        }
+    }
+
+    #[test]
+    fn a_packet_does_not_keep_the_capacity_of_a_dropped_one() {
+        // Each page holds a 1-byte packet, then starts a packet that the
+        // next page drops: that page is not a continuation, or follows a gap
+        // and starts with the tail of a lost packet.
+        for (flags, step, small) in [(0, 1, &[1][..]), (CONTINUED, 2, &[1, 1])] {
+            let mut file = Vec::new();
+            for index in 0..16u32 {
+                let mut page = b"OggS\0".to_vec();
+                page.push(flags);
+                page.extend((-1i64).to_le_bytes());
+                page.extend(7u32.to_le_bytes());
+                page.extend((index * step).to_le_bytes());
+                page.extend([0; 4]);
+                page.push(255);
+                page.extend(small);
+                let large = 255 - small.len();
+                page.extend(vec![255; large]);
+                page.extend(vec![0; small.len() + large * 255]);
+                let crc = checksum(&page);
+                page[22..26].copy_from_slice(&crc.to_le_bytes());
+                file.extend(page);
+            }
+            let mut groups = GroupReader::new(&file[..], 1 << 20);
+            let group = groups.next_group().unwrap().unwrap();
+            assert_eq!(group.packets.len(), 16);
+            for packet in &group.packets {
+                assert_eq!(packet.data.len(), 1);
+                assert!(packet.data.capacity() < 64, "{}", packet.data.capacity());
+            }
         }
     }
 }
