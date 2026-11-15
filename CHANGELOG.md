@@ -4,6 +4,19 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `OggVorbisSource` reads Vorbis in Ogg, behind the new `vorbis` feature. It
+  decodes with lewton, a pure-Rust decoder with the MIT and Apache-2.0
+  licenses. With `Overflow::Wrap`, its output is within ±1 per value of the
+  audiowaveform output, with the same length, also for files that FFmpeg
+  cuts without re-encoding and for truncated files. Like libogg, it skips
+  bytes outside valid pages and continues after a missing page.
+  `VorbisOptions` bounds the packet size, the codebook size and the frames
+  held back to end the output where audiowaveform ends it.
+
 ## [0.1.6] - 2026-11-08
 
 ### Added

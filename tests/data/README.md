@@ -22,6 +22,15 @@ Short files generated for these tests, with no third-party audio:
   and `audio/webm;codecs=opus`. The two Opus files use an
   `audioBitsPerSecond` of 32,000 to keep them small.
 
+- `chord-stereo-44100.ogg`: one second of a stereo chord with clicks and
+  pink noise at 44.1 kHz, encoded by libvorbis 1.3.7 at quality 4. The clicks
+  make the encoder switch between long and short blocks.
+- `square-mono-48000.ogg`: half a second of a square wave near full scale at
+  48 kHz, encoded by libvorbis 1.3.7 at quality 0. Its decoded samples go
+  beyond full scale.
+- `lewton-overflow.ogg`: a file found by fuzzing, with its page checksums
+  fixed. lewton 0.10.2 overflows an integer in one of its floors.
+
 Similar files can be made with:
 
 ```sh
@@ -29,4 +38,5 @@ ffmpeg -f lavfi -i sine=frequency=440:duration=1 -c:a aac sine.aac
 ffmpeg -f lavfi -i sine=frequency=440:duration=1 -c:a libmp3lame -id3v2_version 0 sine.mp3
 ffmpeg -f lavfi -i sine=frequency=440:duration=1 -ac 2 -c:a mp2 chord.mp2
 afconvert -f m4af -d aach input.wav he-aac.m4a
+oggenc -q 4 -o chord.ogg chord.wav
 ```

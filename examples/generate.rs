@@ -1,7 +1,7 @@
 //! Generates a `.dat` or `.json` waveform from an Opus file in Ogg, WebM or
 //! MP4, with the `aac` feature an MP4 or ADTS AAC file, with the `mp3`
-//! feature an MP4 or MPEG audio (MP1, MP2, MP3) file, or with the `flac`
-//! feature a FLAC file.
+//! feature an MP4 or MPEG audio (MP1, MP2, MP3) file, with the `flac`
+//! feature a FLAC file, or with the `vorbis` feature an Ogg Vorbis file.
 //!
 //! Usage: generate <input> <output.dat|output.json> [zoom] [8|16] [split|mixdown]
 //! [bands]
@@ -73,6 +73,19 @@ fn open(path: &str) -> Result<Box<dyn PcmSource>, Error> {
         matches!(magic, [0xFF, second, ..] if second & 0xF6 == 0xF0) || tagged && extension("aac");
     let mpeg_audio = matches!(magic, [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0)
         || tagged && !adts && !flac;
+    // The first packet of the first page tells the codec.
+    let vorbis = ogg
+        && magic
+            .get(26)
+            .and_then(|&segments| magic.get(27 + segments as usize..))
+            .is_some_and(|packet| packet.starts_with(b"\x01vorbis"));
+    #[cfg(feature = "vorbis")]
+    if vorbis {
+        return Ok(Box::new(waveform_peaks::OggVorbisSource::new(input)?));
+    }
+    if vorbis {
+        return Err(Error::Unsupported("Vorbis needs the vorbis feature".into()));
+    }
     if ogg {
         return Ok(Box::new(OggOpusSource::new(input)?));
     }

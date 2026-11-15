@@ -10,14 +10,17 @@
 //! for Opus in Ogg, WebM and Matroska; with the optional `aac` feature,
 //! `AdtsAacSource` for AAC in ADTS; with the optional `mp3` feature,
 //! `MpegAudioSource` for MP1, MP2 and MP3 files; with any of these three,
-//! `Mp4Source` for these codecs in MP4; and with the optional `flac`
-//! feature, `FlacSource` for FLAC files.
+//! `Mp4Source` for these codecs in MP4; with the optional `flac` feature,
+//! `FlacSource` for FLAC files; and with the optional `vorbis` feature,
+//! `OggVorbisSource` for Vorbis in Ogg.
 //!
 //! For the same options the output matches BBC audiowaveform byte for byte on
 //! PCM input, on FLAC input that is not damaged and that claxon decodes, and
 //! on WAV input with [`Overflow::Wrap`]. On Opus input with
 //! `Overflow::Wrap` it is within ±1 per value, because the bundled libopus
 //! build differs from audiowaveform's in the last bit (see `tests/oracle.rs`).
+//! On Vorbis input with `Overflow::Wrap` it is also within ±1 per value,
+//! because lewton rounds some samples differently from libvorbis.
 //!
 //! [`generate_many`] decodes the input once for several outputs, such as
 //! several zoom levels.
@@ -97,6 +100,8 @@ pub use source::MpegAudioSource;
 pub use source::{DecodeRate, OggOpusSource, OpusOptions, WebmOpusSource};
 #[cfg(any(feature = "opus", feature = "aac", feature = "mp3"))]
 pub use source::{Mp4Options, Mp4Source};
+#[cfg(feature = "vorbis")]
+pub use source::{OggVorbisSource, VorbisOptions};
 pub use source::{Overflow, PcmSource, RawPcmSource, WavOptions, WavSource};
 
 /// Drains `source` into `sink` and returns the sink's output.

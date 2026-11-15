@@ -388,7 +388,7 @@ fn wav_layouts_match_audiowaveform() {
 }
 
 /// The samples of a 16-bit WAV file.
-#[cfg(any(feature = "mp3", feature = "flac"))]
+#[cfg(any(feature = "mp3", feature = "flac", feature = "vorbis"))]
 fn wav_file_samples(path: &Path) -> Vec<i16> {
     let bytes = fs::read(path).unwrap();
     let mut at = 12;
@@ -1593,5 +1593,334 @@ mod flac_input {
         ] {
             assert_matches(dir.path(), &file, name);
         }
+    }
+}
+
+#[cfg(feature = "vorbis")]
+mod vorbis_input {
+    use super::*;
+    use common::{fix_ogg_checksum, ogg_pages};
+    use waveform_peaks::{OggVorbisSource, VorbisOptions};
+
+    /// lewton and libvorbis round some samples differently.
+    const VORBIS_TOLERANCE: i32 = 1;
+
+    fn oggenc(args: &[&str]) {
+        run(&tool("OGGENC", "oggenc"), [&["-Q"], args].concat());
+    }
+
+    fn wrap() -> VorbisOptions {
+        let mut options = VorbisOptions::default();
+        options.overflow = Overflow::Wrap;
+        options
+    }
+
+    /// Checks our samples against the WAV file that audiowaveform writes,
+    /// and our peaks against its peaks for a few option sets.
+    fn assert_matches(dir: &Path, file: &[u8], context: &str) {
+        let input = dir.join("input.ogg");
+        fs::write(&input, file).unwrap();
+        let output = dir.join("output.wav");
+        audiowaveform(&[
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        let theirs = wav_file_samples(&output);
+        let source = OggVorbisSource::with_options(Cursor::new(file), wrap()).unwrap();
+        let ours = common::samples(source).unwrap();
+        let ours: Vec<i32> = ours.iter().map(|&s| s as i32).collect();
+        let theirs: Vec<i32> = theirs.iter().map(|&s| s as i32).collect();
+        common::assert_values_match(&ours, &theirs, VORBIS_TOLERANCE, context);
+
+        for options in [
+            Options::default(),
+            options(37, Bits::Eight, ChannelMode::Split),
+        ] {
+            let expected = reference(&input, &[], &options, &dir.join("ref.dat"));
+            let mut source = OggVorbisSource::with_options(Cursor::new(file), wrap()).unwrap();
+            let actual = ours_dat(&mut source, &options);
+            let context = format!("{context}, {options:?}");
+            assert_dat_matches(&actual, &expected, VORBIS_TOLERANCE, &context);
+        }
+    }
+
+    fn granule(page: &[u8]) -> i64 {
+        i64::from_le_bytes(page[6..14].try_into().unwrap())
+    }
+
+    /// `file` with its pages changed by `change(index, page)`.
+    fn changed(file: &[u8], mut change: impl FnMut(usize, &mut Vec<u8>)) -> Vec<u8> {
+        let mut pages = ogg_pages(file);
+        for (i, page) in pages.iter_mut().enumerate() {
+            change(i, page);
+            fix_ogg_checksum(page);
+        }
+        pages.concat()
+    }
+
+    fn shifted(file: &[u8], offset: i64) -> Vec<u8> {
+        changed(file, |i, page| {
+            if i >= 2 && granule(page) != -1 {
+                let shifted = granule(page) + offset;
+                page[6..14].copy_from_slice(&shifted.to_le_bytes());
+            }
+        })
+    }
+
+    /// Inserts an empty packet before packet `index` of `page`, which must
+    /// not start with a continued packet.
+    fn insert_empty_packet(page: &mut Vec<u8>, index: usize) {
+        assert!(page[26] < 255);
+        let lacing = &page[27..27 + page[26] as usize];
+        let at = lacing
+            .iter()
+            .enumerate()
+            .filter(|&(_, &len)| len < 255)
+            .nth(index - 1)
+            .unwrap()
+            .0
+            + 1;
+        page.insert(27 + at, 0);
+        page[26] += 1;
+    }
+
+    /// The start of a page that claims `segments` lacing values of `lacing`
+    /// bytes each, with no checksum: libogg reads that length before it
+    /// checks the page.
+    fn false_header(segments: u8, lacing: u8) -> Vec<u8> {
+        let mut header = b"OggS".to_vec();
+        header.resize(26, 0);
+        header.push(segments);
+        header.extend(vec![lacing; segments as usize]);
+        header
+    }
+
+    /// `file` as written, and with the changes that uploads and damage
+    /// bring. The audio starts on the third page.
+    fn variants(file: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        let pages = ogg_pages(file);
+        assert!(pages.len() >= 6, "{} pages", pages.len());
+        let without = |skip: usize| {
+            let mut pages = pages.clone();
+            pages.remove(skip);
+            pages.concat()
+        };
+        vec![
+            ("as written", file.to_vec()),
+            ("cut after a page", pages[..pages.len() - 1].concat()),
+            ("cut inside a page", file[..file.len() - 1001].to_vec()),
+            ("positive start offset", shifted(file, 10_000)),
+            (
+                "negative start offset",
+                shifted(file, -(granule(&pages[2]) / 2)),
+            ),
+            (
+                "negative first granule position",
+                shifted(file, -(granule(&pages[2]) + 3000)),
+            ),
+            (
+                "first granule position unknown",
+                changed(file, |i, page| {
+                    if i == 2 {
+                        page[6..14].copy_from_slice(&(-1i64).to_le_bytes());
+                    }
+                }),
+            ),
+            (
+                "no end-of-stream flag",
+                changed(file, |_, page| page[5] &= !0x04),
+            ),
+            (
+                "empty packet before a low first granule position",
+                changed(file, |i, page| {
+                    if i == 2 {
+                        let low = granule(page) - 700;
+                        page[6..14].copy_from_slice(&low.to_le_bytes());
+                        insert_empty_packet(page, 5);
+                    }
+                }),
+            ),
+            ("page lost", without(4)),
+            (
+                "wrong checksum",
+                pages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, page)| {
+                        let mut page = page.clone();
+                        if i == 4 {
+                            page[22] ^= 1;
+                        }
+                        page
+                    })
+                    .collect(),
+            ),
+            (
+                "junk between pages",
+                pages
+                    .iter()
+                    .flat_map(|page| [false_header(1, 100).as_slice(), b"junk", page].concat())
+                    .collect(),
+            ),
+            (
+                "false page header near the end",
+                [
+                    pages[..pages.len() - 2].concat(),
+                    false_header(255, 255),
+                    pages[pages.len() - 2..].concat(),
+                ]
+                .concat(),
+            ),
+            (
+                "page of another version",
+                pages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, page)| {
+                        let mut other = page.clone();
+                        other[4] = 1;
+                        fix_ogg_checksum(&mut other);
+                        if i == 4 {
+                            [page.clone(), other].concat()
+                        } else {
+                            page.clone()
+                        }
+                    })
+                    .collect(),
+            ),
+            ("chained", [file, file].concat()),
+        ]
+    }
+
+    const SIGNAL: &str = "aevalsrc=0.8*sin(440*2*PI*t)*sin(3*PI*t)|0.5*sin(1000*2*PI*t)+0.05*random(0)|0.3*sin(50*2*PI*t)+0.2*random(1):s=48000:d=30.37";
+
+    #[test]
+    #[ignore = "needs audiowaveform, ffmpeg and oggenc on PATH"]
+    fn libvorbis_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let wav = dir.path().join("input.wav");
+        let path = dir.path().join("encoded.ogg");
+        for (rate, channels, quality) in [
+            ("8000", "1", "-1"),
+            ("22050", "2", "0"),
+            ("44100", "2", "3"),
+            ("48000", "1", "6"),
+            ("48000", "3", "10"),
+            ("96000", "2", "4"),
+        ] {
+            ffmpeg(&[
+                "-f",
+                "lavfi",
+                "-i",
+                SIGNAL,
+                "-ar",
+                rate,
+                "-ac",
+                channels,
+                wav.to_str().unwrap(),
+            ]);
+            oggenc(&[
+                "-q",
+                quality,
+                "-o",
+                path.to_str().unwrap(),
+                wav.to_str().unwrap(),
+            ]);
+            let file = fs::read(&path).unwrap();
+            for (variant, file) in variants(&file) {
+                let context = format!("{rate} Hz, {channels} ch, quality {quality}, {variant}");
+                assert_matches(dir.path(), &file, &context);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs audiowaveform, ffmpeg and oggenc on PATH"]
+    fn ffmpeg_vorbis_matches_audiowaveform() {
+        let dir = TempDir::new().unwrap();
+        let wav = dir.path().join("input.wav");
+        let encoded = dir.path().join("encoded.ogg");
+        let path = dir.path().join("output.ogg");
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            SIGNAL,
+            "-ac",
+            "2",
+            wav.to_str().unwrap(),
+        ]);
+
+        // FFmpeg's own encoder.
+        ffmpeg(&[
+            "-i",
+            wav.to_str().unwrap(),
+            "-c:a",
+            "vorbis",
+            "-strict",
+            "-2",
+            path.to_str().unwrap(),
+        ]);
+        assert_matches(dir.path(), &fs::read(&path).unwrap(), "FFmpeg encoder");
+
+        // A cut without re-encoding gives a negative start offset.
+        oggenc(&[
+            "-q",
+            "3",
+            "-o",
+            encoded.to_str().unwrap(),
+            wav.to_str().unwrap(),
+        ]);
+        for start in ["0.5", "1.3", "2.71"] {
+            ffmpeg(&[
+                "-ss",
+                start,
+                "-i",
+                encoded.to_str().unwrap(),
+                "-c",
+                "copy",
+                path.to_str().unwrap(),
+            ]);
+            let file = fs::read(&path).unwrap();
+            let pages = ogg_pages(&file);
+            assert!(granule(&pages[2]) >= 0);
+            assert_matches(dir.path(), &file, &format!("FFmpeg cut at {start} s"));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs audiowaveform, ffmpeg and oggenc on PATH"]
+    fn saturate_differs_from_wrap_only_when_clipping() {
+        let dir = TempDir::new().unwrap();
+        let wav = dir.path().join("input.wav");
+        let path = dir.path().join("encoded.ogg");
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=exprs=sgn(sin(440*2*PI*t)):s=48000:d=1",
+            wav.to_str().unwrap(),
+        ]);
+        oggenc(&[
+            "-q",
+            "2",
+            "-o",
+            path.to_str().unwrap(),
+            wav.to_str().unwrap(),
+        ]);
+        let file = fs::read(&path).unwrap();
+        assert_matches(dir.path(), &file, "clipping square");
+        let saturated = common::samples(OggVorbisSource::new(Cursor::new(&file)).unwrap()).unwrap();
+        let wrapped =
+            common::samples(OggVorbisSource::with_options(Cursor::new(&file), wrap()).unwrap())
+                .unwrap();
+        let differences = saturated
+            .iter()
+            .zip(&wrapped)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(differences > 0);
     }
 }
